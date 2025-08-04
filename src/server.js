@@ -1,10 +1,11 @@
+require("dotenv").config();
 const express = require('express');
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(express.json());
 
-const invoices=[
+let invoices=[
 {
     _id: "685d491e4e1c98e6a242d3c0",
     user: "6777a7ab5cd5d327209fa1db",
@@ -49,7 +50,7 @@ const invoices=[
     amount_due: 0,
     postdated_payment: 0,
     logo: "https://storagetimberuat.blob.core.windows.net/timberstorage/invoice/logo/logo_4fc8d63b18dd5355.png?...",
-    status: "paid",
+    status: "pending",
     is_deleted: false,
     guidelines: [],
     created_at: "2025-06-26T13:20:30.746Z",
@@ -62,21 +63,26 @@ const invoices=[
 
 app.post('/webhook', (req, res) => {
   const { event, data, apiKey } = req.body;
+  console.log(event, data, apiKey,'webhook called');
 
   // ✅ 1. Auth check
-  if (apiKey !== process.env.AGENT_API_KEY) {
+  if (apiKey !== process.env.API_KEY) {
+    console.log("Unauthorized",process.env.API_KEY);
     return res.status(403).json({ error: "Unauthorized" });
   }
 
   if (event === "sync-request") {
+    console.log("Sync request received");
     // 📨 Send pending invoices
     const pending = invoices.filter(i => i.status === "pending");
     return res.json({ invoices: pending });
   }
 
   if (event === "sync-status") {
+    console.log("Sync status received");
     // 🛠 Update invoice sync status
     const { invoiceId, status, error } = data;
+    console.log(invoiceId, status, error);
     invoices = invoices.map(inv =>
       inv._id === invoiceId ? { ...inv, status, error } : inv
     );
