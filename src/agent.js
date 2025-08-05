@@ -10,34 +10,54 @@ const TALLY_URL = "http://localhost:9000";
 function buildLedgerXML(name) {
   return create({ version: "1.0", encoding: "UTF-8" })
     .ele("ENVELOPE")
-      .ele("HEADER").ele("TALLYREQUEST").txt("Import Data").up().up()
-      .ele("BODY").ele("IMPORTDATA").ele("REQUESTDATA")
-        .ele("TALLYMESSAGE").att("xmlns:UDF", "TallyUDF")
-          .ele("LEDGER").att("NAME", name).att("Action", "Create")
-            .ele("NAME").txt(name).up()
-            .ele("PARENT").txt("Sundry Debtors").up()
-            .ele("ISBILLWISEON").txt("Yes").up()
-            .ele("AFFECTSSTOCK").txt("No").up()
+      .ele("HEADER")
+        .ele("TALLYREQUEST").txt("Import Data").up()
+      .up()
+      .ele("BODY")
+        .ele("IMPORTDATA")
+          .ele("REQUESTDESC")
+            .ele("REPORTNAME").txt("All Masters").up()
+          .up()
+          .ele("REQUESTDATA")
+            .ele("TALLYMESSAGE").att("xmlns:UDF", "TallyUDF")
+              .ele("LEDGER").att("NAME", name).att("Action", "Create")
+                .ele("NAME").txt(name).up()
+                .ele("PARENT").txt("Sundry Debtors").up()
+                .ele("ISBILLWISEON").txt("Yes").up()
+                .ele("AFFECTSSTOCK").txt("No").up()
+              .up()
+            .up()
           .up()
         .up()
       .up()
     .end({ prettyPrint: true });
 }
 
+
 function buildItemXML(name) {
   return create({ version: "1.0", encoding: "UTF-8" })
     .ele("ENVELOPE")
-      .ele("HEADER").ele("TALLYREQUEST").txt("Import Data").up().up()
-      .ele("BODY").ele("IMPORTDATA").ele("REQUESTDATA")
-        .ele("TALLYMESSAGE").att("xmlns:UDF", "TallyUDF")
-          .ele("STOCKITEM").att("NAME", name).att("Action", "Create")
-            .ele("NAME").txt(name).up()
-            .ele("BASEUNITS").txt("Nos").up()
+      .ele("HEADER")
+        .ele("TALLYREQUEST").txt("Import Data").up()
+      .up()
+      .ele("BODY")
+        .ele("IMPORTDATA")
+          .ele("REQUESTDESC")
+            .ele("REPORTNAME").txt("All Masters").up()
+          .up()
+          .ele("REQUESTDATA")
+            .ele("TALLYMESSAGE").att("xmlns:UDF", "TallyUDF")
+              .ele("STOCKITEM").att("NAME", name).att("Action", "Create")
+                .ele("NAME").txt(name).up()
+                .ele("BASEUNITS").txt("Nos").up()
+              .up()
+            .up()
           .up()
         .up()
       .up()
     .end({ prettyPrint: true });
 }
+
 
 // 🧾 Build Tally invoice XML
 function buildInvoiceXML(invoice) {
@@ -84,7 +104,7 @@ function buildInvoiceXML(invoice) {
 // 🔁 Try master creation before sending invoice
 async function ensureMasterData(invoice) {
   const customerXML = buildLedgerXML(invoice.customer.name);
-  await axios.post(TALLY_URL, customerXML, {
+  const customer_res=await axios.post(TALLY_URL, customerXML, {
     headers: { "Content-Type": "application/xml" },
   });
 
@@ -94,6 +114,7 @@ async function ensureMasterData(invoice) {
       headers: { "Content-Type": "application/xml" },
     });
   }
+  console.log(customer_res?.data,"customer created");
 }
 
 // 🔁 POST status back to server
