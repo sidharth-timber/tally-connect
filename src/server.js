@@ -1,5 +1,12 @@
 require("dotenv").config();
 const express = require('express');
+const fs = require("fs-extra");
+const path = require("path");
+const { v4: uuidv4 } = require("uuid");
+const { spawn } = require("child_process");
+
+
+
 const app = express();
 const port = process.env.PORT || 3000;
 
@@ -58,6 +65,93 @@ let invoices=[
     __v: 0
   }
 ]
+
+app.get("/download", async (req, res) => {
+  try {
+    const companyId = req.query.companyId;
+  if (!companyId) return res.status(400).send("Missing companyId");
+
+  const buildId = crypto.randomUUID();
+  const buildDir = path.join(__dirname, "installers", `build-${buildId}`);
+  await fs.mkdir(buildDir, { recursive: true });
+
+  // Copy agent.js etc. to build folder
+  await fs.copyFile(
+    path.join(__dirname, "templates", "agent.js"),
+    path.join(buildDir, "agent.js")
+  );
+  await fs.copyFile(
+    path.join(__dirname, "templates", "install-service.js"),
+    path.join(buildDir, "install-service.js")
+  );
+  await fs.copyFile(
+    path.join(__dirname, "templates", "package.json"),
+    path.join(buildDir, "package.json")
+  );
+  await fs.copy(
+  path.join(__dirname, "templates", "node_modules"),
+  path.join(buildDir, "node_modules")
+);
+
+  const dynamicEnv = `COMPANY_ID=${companyId}
+API_KEY=${process.env.API_KEY}
+SERVER_URL=${process.env.SERVER_URL || 'https://defaultserver.com'}
+`;
+
+await fs.writeFile(path.join(buildDir, ".env"), dynamicEnv);
+console.log("Dynamic .env written to:", path.join(buildDir, ".env"));
+
+  // Read installer.iss template
+  const issTemplate = await fs.readFile(
+    path.join(__dirname, "templates", "installer.iss"),
+    "utf-8"
+  );
+
+  // Inject dynamic OutputDir & OutputBaseFilename
+  const dynamicIss = issTemplate
+    .replace(/OutputDir=.*/g, `OutputDir=${buildDir.replace(/\\/g, "\\\\")}`)
+    .replace(/OutputBaseFilename=.*/g, `OutputBaseFilename=TallyAgent-${companyId}`);
+
+  const dynamicIssPath = path.join(buildDir, "installer.iss");
+  await fs.writeFile(dynamicIssPath, dynamicIss);
+
+  console.log("Dynamic ISS file written to:", dynamicIssPath);
+
+  // Run ISCC on dynamic installer.iss
+  const iscc = spawn("ISCC", [dynamicIssPath], {
+    cwd: buildDir,
+    env: process.env,
+  });
+
+  iscc.stdout.on("data", (data) => console.log(`ISCC: ${data}`));
+  iscc.stderr.on("data", (data) => console.error(`ISCC ERROR: ${data}`));
+
+  iscc.on("close", (code) => {
+    console.log(`ISCC exited with code ${code}`);
+
+    if (code !== 0) {
+      return res.status(500).send("Installer compilation failed.");
+    }
+
+    const outputExe = path.join(buildDir, `TallyAgent-${companyId}.exe`);
+    console.log("Looking for installer at:", outputExe);
+
+    console.log("Looking for installer at:", outputExe);
+
+    if (!fs.existsSync(outputExe)) {
+      console.error("Installer not found!");
+      return res.status(500).send("Installer not found.");
+    }
+console.log("Sending file:", outputExe);
+
+    res.download(outputExe, `TallyAgent-${companyId}.exe`);
+  });
+  } catch (error) {
+    console.error(error);
+    return res.status(500).send("Error");
+  }
+  
+});
 
 
 
