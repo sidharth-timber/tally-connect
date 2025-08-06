@@ -4,6 +4,7 @@ const fs = require("fs-extra");
 const path = require("path");
 const { v4: uuidv4 } = require("uuid");
 const { spawn } = require("child_process");
+const crypto = require('crypto');
 
 
 
@@ -29,7 +30,7 @@ let invoices=[
       biller_id: null
     },
     customer: {
-      name: "John Doe Enterprises",
+      name: "Nafa Enterprises",
       email: "john@doe.com",
       country_code: "+971",
       mobile: "501234567",
@@ -69,88 +70,151 @@ let invoices=[
 app.get("/download", async (req, res) => {
   try {
     const companyId = req.query.companyId;
-  if (!companyId) return res.status(400).send("Missing companyId");
+    if (!companyId) return res.status(400).send("Missing companyId");
 
-  const buildId = crypto.randomUUID();
-  const buildDir = path.join(__dirname, "installers", `build-${buildId}`);
-  await fs.mkdir(buildDir, { recursive: true });
+    const buildId = crypto.randomUUID();
+    const buildDir = path.join(__dirname, "installers", `build-${buildId}`);
+    
+    console.log("Creating build directory:", buildDir);
+    await fs.mkdir(buildDir, { recursive: true });
 
-  // Copy agent.js etc. to build folder
-  await fs.copyFile(
-    path.join(__dirname, "templates", "agent.js"),
-    path.join(buildDir, "agent.js")
-  );
-  await fs.copyFile(
-    path.join(__dirname, "templates", "install-service.js"),
-    path.join(buildDir, "install-service.js")
-  );
-  await fs.copyFile(
-    path.join(__dirname, "templates", "package.json"),
-    path.join(buildDir, "package.json")
-  );
-  await fs.copy(
-  path.join(__dirname, "templates", "node_modules"),
-  path.join(buildDir, "node_modules")
-);
+    // Paths for source files
+    const sourceAgentPath = path.join(__dirname, "agent", "TallyAgent.exe");
+    const targetAgentPath = path.join(buildDir, "TallyAgent.exe");
 
-  const dynamicEnv = `COMPANY_ID=${companyId}
-API_KEY=${process.env.API_KEY}
+    // Check if source agent exists
+    if (!fs.existsSync(sourceAgentPath)) {
+      console.error("Source TallyAgent.exe not found at:", sourceAgentPath);
+      return res.status(500).send("Agent executable not found");
+    }
+
+    // Copy the pre-built TallyAgent.exe binary to build folder
+    console.log("Copying agent from:", sourceAgentPath);
+    console.log("Copying agent to:", targetAgentPath);
+    await fs.copyFile(sourceAgentPath, targetAgentPath);
+
+    // Write dynamic .env file
+    const dynamicEnv = `COMPANY_ID=${companyId}
+API_KEY=${process.env.API_KEY || ''}
 SERVER_URL=${process.env.SERVER_URL || 'https://defaultserver.com'}
 `;
 
-await fs.writeFile(path.join(buildDir, ".env"), dynamicEnv);
-console.log("Dynamic .env written to:", path.join(buildDir, ".env"));
+    const envPath = path.join(buildDir, ".env");
+    await fs.writeFile(envPath, dynamicEnv);
+    console.log("Dynamic .env written to:", envPath);
 
-  // Read installer.iss template
-  const issTemplate = await fs.readFile(
-    path.join(__dirname, "templates", "installer.iss"),
-    "utf-8"
-  );
-
-  // Inject dynamic OutputDir & OutputBaseFilename
-  const dynamicIss = issTemplate
-    .replace(/OutputDir=.*/g, `OutputDir=${buildDir.replace(/\\/g, "\\\\")}`)
-    .replace(/OutputBaseFilename=.*/g, `OutputBaseFilename=TallyAgent-${companyId}`);
-
-  const dynamicIssPath = path.join(buildDir, "installer.iss");
-  await fs.writeFile(dynamicIssPath, dynamicIss);
-
-  console.log("Dynamic ISS file written to:", dynamicIssPath);
-
-  // Run ISCC on dynamic installer.iss
-  const iscc = spawn("ISCC", [dynamicIssPath], {
-    cwd: buildDir,
-    env: process.env,
-  });
-
-  iscc.stdout.on("data", (data) => console.log(`ISCC: ${data}`));
-  iscc.stderr.on("data", (data) => console.error(`ISCC ERROR: ${data}`));
-
-  iscc.on("close", (code) => {
-    console.log(`ISCC exited with code ${code}`);
-
-    if (code !== 0) {
-      return res.status(500).send("Installer compilation failed.");
+    // Read installer.iss template
+    const templatePath = path.join(__dirname, "templates", "installer.iss");
+    
+    if (!fs.existsSync(templatePath)) {
+      console.error("Template not found at:", templatePath);
+      return res.status(500).send("Installer template not found");
     }
 
-    const outputExe = path.join(buildDir, `TallyAgent-${companyId}.exe`);
-    console.log("Looking for installer at:", outputExe);
+    const issTemplate = await fs.readFile(templatePath, "utf-8");
 
-    console.log("Looking for installer at:", outputExe);
+    // Convert Windows path separators for ISS - use forward slashes or double backslashes
+    const buildDirForIss = buildDir.replace(/\\/g, "/");
+    const outputFilename = `TallyAgent-${companyId}`;
 
-    if (!fs.existsSync(outputExe)) {
-      console.error("Installer not found!");
-      return res.status(500).send("Installer not found.");
-    }
-console.log("Sending file:", outputExe);
+    // Create dynamic ISS content with proper variable definitions
+    const dynamicIss = `; Auto-generated installer script
+#define MyBuildDir "${buildDirForIss}"
+#define OutputFilename "${outputFilename}"
+#define CompanyId "${companyId}"
 
-    res.download(outputExe, `TallyAgent-${companyId}.exe`);
-  });
+` + issTemplate;
+
+    const dynamicIssPath = path.join(buildDir, "installer.iss");
+    await fs.writeFile(dynamicIssPath, dynamicIss);
+    console.log("Dynamic ISS file written to:", dynamicIssPath);
+
+    // Run ISCC on dynamic installer.iss
+    console.log("Starting ISCC compilation...");
+    const iscc = spawn("ISCC", [dynamicIssPath], {
+      cwd: buildDir,
+      env: process.env,
+      shell: true // Important for Windows
+    });
+
+    let stdout = '';
+    let stderr = '';
+
+    iscc.stdout.on("data", (data) => {
+      const output = data.toString();
+      console.log(`ISCC: ${output}`);
+      stdout += output;
+    });
+
+    iscc.stderr.on("data", (data) => {
+      const error = data.toString();
+      console.error(`ISCC ERROR: ${error}`);
+      stderr += error;
+    });
+
+    iscc.on("error", (error) => {
+      console.error("Failed to start ISCC process:", error);
+      return res.status(500).send("Failed to start installer compilation");
+    });
+
+    iscc.on("close", async (code) => {
+      console.log(`ISCC exited with code ${code}`);
+      
+      if (stdout) console.log("ISCC stdout:", stdout);
+      if (stderr) console.log("ISCC stderr:", stderr);
+
+      if (code !== 0) {
+        console.error("ISCC compilation failed with code:", code);
+        return res.status(500).send(`Installer compilation failed. Exit code: ${code}`);
+      }
+
+      // The output file should be in the build directory
+      const outputExe = path.join(buildDir, `${outputFilename}.exe`);
+      console.log("Looking for installer at:", outputExe);
+
+      if (!fs.existsSync(outputExe)) {
+        console.error("Installer not found at expected location!");
+        
+        // List files in build directory for debugging
+        try {
+          const files = await fs.readdir(buildDir);
+          console.log("Files in build directory:", files);
+        } catch (e) {
+          console.error("Could not list build directory:", e);
+        }
+        
+        return res.status(500).send("Installer file not found after compilation");
+      }
+
+      console.log("Sending file:", outputExe);
+      
+      // Set proper headers
+      res.setHeader('Content-Disposition', `attachment; filename="${outputFilename}.exe"`);
+      res.setHeader('Content-Type', 'application/octet-stream');
+      
+      res.download(outputExe, `${outputFilename}.exe`, (err) => {
+        if (err) {
+          console.error("Error sending file:", err);
+        } else {
+          console.log("File sent successfully");
+        }
+        
+        // Clean up build directory after a delay
+        setTimeout(async () => {
+          try {
+            await fs.rm(buildDir, { recursive: true, force: true });
+            console.log("Cleaned up build directory:", buildDir);
+          } catch (cleanupError) {
+            console.error("Failed to clean up build directory:", cleanupError);
+          }
+        }, 10000); // 10 seconds delay
+      });
+    });
+
   } catch (error) {
-    console.error(error);
-    return res.status(500).send("Error");
+    console.error("Download route error:", error);
+    return res.status(500).send(`Server error: ${error.message}`);
   }
-  
 });
 
 

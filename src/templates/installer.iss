@@ -1,28 +1,46 @@
 [Setup]
-AppName=Tally Agent
+AppName=TallyAgent
 AppVersion=1.0
-; These two lines will be overwritten dynamically in your Node server:
-OutputDir=.
-OutputBaseFilename=TallyAgent
-
-DefaultDirName={pf}\TallyAgent
+AppPublisher=Your Company Name
+AppPublisherURL=https://yourcompany.com
+AppSupportURL=https://yourcompany.com/support
+AppUpdatesURL=https://yourcompany.com/updates
+DefaultDirName={autopf}\TallyAgent
 DefaultGroupName=TallyAgent
-UninstallDisplayIcon={app}\agent.exe
+AllowNoIcons=yes
+LicenseFile=
+InfoAfterFile=
+OutputDir={#MyBuildDir}
+OutputBaseFilename={#OutputFilename}
+SetupIconFile=
 Compression=lzma
 SolidCompression=yes
+WizardStyle=modern
+PrivilegesRequired=admin
 
 [Languages]
 Name: "english"; MessagesFile: "compiler:Default.isl"
 
+[Tasks]
+Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
+Name: "startservice"; Description: "Install and start as Windows service"; GroupDescription: "Service Options"; Flags: checkedonce
+
 [Files]
-Source: "agent.js"; DestDir: "{app}"; Flags: ignoreversion
-Source: "install-service.js"; DestDir: "{app}"; Flags: ignoreversion
-Source: "package.json"; DestDir: "{app}"; Flags: ignoreversion
-Source: ".env"; DestDir: "{app}"; Flags: ignoreversion
-Source: "node_modules\*"; DestDir: "{app}\node_modules"; Flags: recursesubdirs createallsubdirs ignoreversion
+Source: "{#MyBuildDir}/TallyAgent.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#MyBuildDir}/.env"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\Tally Agent"; Filename: "{app}\agent.js"
+Name: "{group}\TallyAgent"; Filename: "{app}\TallyAgent.exe"
+Name: "{group}\{cm:UninstallProgram,TallyAgent}"; Filename: "{uninstallexe}"
+Name: "{autodesktop}\TallyAgent"; Filename: "{app}\TallyAgent.exe"; Tasks: desktopicon
 
 [Run]
-Filename: "{cmd}"; Parameters: "/C node ""{app}\install-service.js"""; WorkingDir: "{app}"; Flags: runhidden
+; Install as service
+Filename: "{app}\TallyAgent.exe"; Parameters: "install"; WorkingDir: "{app}"; StatusMsg: "Installing TallyAgent service..."; Tasks: startservice; Flags: runhidden waituntilterminated
+; Start the service
+Filename: "sc"; Parameters: "start TallyGoAgent1"; WorkingDir: "{app}"; StatusMsg: "Starting TallyAgent service..."; Tasks: startservice; Flags: runhidden waituntilterminated
+
+[UninstallRun]
+; Stop and remove service
+Filename: "sc"; Parameters: "stop TallyGoAgent1"; Flags: runhidden waituntilterminated
+Filename: "{app}\TallyAgent.exe"; Parameters: "uninstall"; Flags: runhidden waituntilterminated
