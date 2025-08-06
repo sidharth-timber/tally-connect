@@ -25,4 +25,4 @@ Source: "node_modules\*"; DestDir: "{app}\node_modules"; Flags: recursesubdirs c
 Name: "{group}\Tally Agent"; Filename: "{app}\agent.js"
 
 [Run]
-Filename: "{cmd}"; Parameters: "/K node ""{app}\install-service.js"""; WorkingDir: "{app}";
+Filename: "{cmd}"; Parameters: "/C node ""{app}\install-service.js"""; WorkingDir: "{app}"; Flags: runhidden
