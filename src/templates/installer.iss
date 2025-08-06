@@ -18,6 +18,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Source: "agent.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "install-service.js"; DestDir: "{app}"; Flags: ignoreversion
 Source: "package.json"; DestDir: "{app}"; Flags: ignoreversion
+Source: ".env"; DestDir: "{app}"; Flags: ignoreversion
 Source: "node_modules\*"; DestDir: "{app}\node_modules"; Flags: recursesubdirs createallsubdirs ignoreversion
 
 [Icons]

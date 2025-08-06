@@ -1,9 +1,12 @@
 require("dotenv").config();
+const fs = require("fs");
+
 const axios = require("axios");
 const { create } = require("xmlbuilder2");
 
 const SERVER_URL = process.env.SERVER_URL;
 const API_KEY = process.env.API_KEY;
+fs.appendFileSync("C:\\TallyAgent-run-log.txt", `${SERVER_URL} agent.js started at ${new Date()}\n`);
 const TALLY_URL = "http://localhost:9000";
 
 // 🧱 Helper to build unit XML for "PIECES"
