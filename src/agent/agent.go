@@ -160,6 +160,8 @@ func maskString(s string) string {
 	return s[:2] + strings.Repeat("*", len(s)-4) + s[len(s)-2:]
 }
 
+
+
 func startAgent() {
 	logger.Println("🚀 Starting agent main loop...")
 	
@@ -272,10 +274,17 @@ func syncInvoices() {
 	logger.Println("✅ Sync completed successfully")
 }
 
-// ... rest of your existing functions remain the same
 func processInvoice(invoice map[string]interface{}) {
 	id := invoice["_id"]
 	logger.Printf("🔄 Processing invoice %v", id)
+
+	// Add recovery mechanism for panics
+	defer func() {
+		if r := recover(); r != nil {
+			logger.Printf("🚨 Panic recovered while processing invoice %v: %v", id, r)
+			reportStatus(id, "error", fmt.Sprintf("Panic: %v", r))
+		}
+	}()
 
 	err := ensureMasterData(invoice)
 	if err != nil {
@@ -335,7 +344,7 @@ func reportStatus(id interface{}, status, errMsg string) {
 	
 	logger.Printf("📤 Sending status to: %s", webhookURL)
 	
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second} // Reduced timeout for status reporting
 	resp, err := client.Post(webhookURL, "application/json", bytes.NewBuffer(bodyJSON))
 	if err != nil {
 		logger.Printf("❌ Failed to report status: %v", err)
@@ -355,7 +364,6 @@ func extractLineError(response string) string {
 	return ""
 }
 
-// Keep your existing helper functions
 func ensureMasterData(invoice map[string]interface{}) error {
 	steps := []struct {
 		name string
@@ -369,62 +377,92 @@ func ensureMasterData(invoice map[string]interface{}) error {
 
 	for _, s := range steps {
 		logger.Printf("🔧 Ensuring %s", s.name)
-		resp, err := http.Post(tallyURL, "application/xml", strings.NewReader(s.xml))
-		if err != nil {
-			return fmt.Errorf("%s post error: %v", s.name, err)
-		}
-		defer resp.Body.Close()
-		respBytes, _ := io.ReadAll(resp.Body)
-		respStr := string(respBytes)
-		logger.Printf("📥 %s response: %s", s.name, respStr)
-		if errMsg := extractLineError(respStr); errMsg != "" && !strings.Contains(strings.ToLower(errMsg), "already exists") {
-			return fmt.Errorf("%s creation failed: %s", s.name, errMsg)
+		if err := postToTally(s.xml, s.name); err != nil {
+			return fmt.Errorf("%s error: %v", s.name, err)
 		}
 	}
 
-	items := invoice["items"].([]interface{})
-	for _, it := range items {
-		itemMap := it.(map[string]interface{})
+	// Handle items with better error handling
+	items, ok := invoice["items"].([]interface{})
+	if !ok {
+		return fmt.Errorf("invalid items format in invoice")
+	}
+
+	for i, it := range items {
+		itemMap, ok := it.(map[string]interface{})
+		if !ok {
+			logger.Printf("⚠️ Skipping invalid item %d: not a map", i)
+			continue
+		}
+		
 		itemName := getItemName(itemMap)
+		if itemName == "" || itemName == "Unknown Item" {
+			logger.Printf("⚠️ Skipping item %d with empty/unknown name", i)
+			continue
+		}
+		
 		itemXML := buildItemXML(itemName)
 		logger.Printf("🔧 Ensuring Item %s", itemName)
-		resp, err := http.Post(tallyURL, "application/xml", strings.NewReader(itemXML))
-		if err != nil {
-			return fmt.Errorf("Item %s post error: %v", itemName, err)
-		}
-		defer resp.Body.Close()
-		respBytes, _ := io.ReadAll(resp.Body)
-		respStr := string(respBytes)
-		if errMsg := extractLineError(respStr); errMsg != "" && !strings.Contains(strings.ToLower(errMsg), "already exists") {
-			return fmt.Errorf("Item %s creation failed: %s", itemName, errMsg)
+		
+		if err := postToTally(itemXML, fmt.Sprintf("Item %s", itemName)); err != nil {
+			return fmt.Errorf("Item %s error: %v", itemName, err)
 		}
 	}
 	return nil
 }
 
+// New helper function to centralize Tally posting with better error handling
+func postToTally(xmlData, entityName string) error {
+	client := &http.Client{Timeout: 15 * time.Second} // Reduced timeout
+	
+	resp, err := client.Post(tallyURL, "application/xml", strings.NewReader(xmlData))
+	if err != nil {
+		return fmt.Errorf("HTTP post failed: %v", err)
+	}
+	defer resp.Body.Close()
+	
+	respBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return fmt.Errorf("failed to read response: %v", err)
+	}
+	
+	respStr := string(respBytes)
+	logger.Printf("📥 %s response: %s", entityName, respStr)
+	
+	if errMsg := extractLineError(respStr); errMsg != "" {
+		// Check if it's just "already exists" error - that's okay
+		if strings.Contains(strings.ToLower(errMsg), "already exists") {
+			logger.Printf("ℹ️  %s already exists (ignored)", entityName)
+			return nil
+		}
+		return fmt.Errorf("Tally error: %s", errMsg)
+	}
+	
+	return nil
+}
+
 func getCustomerName(invoice map[string]interface{}) string {
 	if customer, ok := invoice["customer"].(map[string]interface{}); ok {
-		if name, ok := customer["name"].(string); ok {
+		if name, ok := customer["name"].(string); ok && name != "" {
 			return name
 		}
 	}
-	if name, ok := invoice["customerName"].(string); ok {
+	if name, ok := invoice["customerName"].(string); ok && name != "" {
 		return name
 	}
 	return "Unknown Customer"
 }
 
 func getItemName(item map[string]interface{}) string {
-	if t, ok := item["title"].(string); ok {
+	if t, ok := item["title"].(string); ok && t != "" {
 		return t
 	}
-	if n, ok := item["name"].(string); ok {
+	if n, ok := item["name"].(string); ok && n != "" {
 		return n
 	}
 	return "Unknown Item"
 }
 
-// Keep your existing XML building functions
 func buildUnitXML() string {
 	doc := etree.NewDocument()
 	env := doc.CreateElement("ENVELOPE")
@@ -446,12 +484,35 @@ func buildUnitXML() string {
 	return xml
 }
 
-func buildStockGroupXML() string { return buildGenericLedgerXML("STOCKGROUP", "Primary") }
-func buildSalesLedgerXML() string { return buildGenericLedgerXML("LEDGER", "Sales Account") }
-func buildLedgerXML(name string) string { return buildGenericLedgerXML("LEDGER", name) }
-func buildItemXML(name string) string { return buildGenericLedgerXML("STOCKITEM", name) }
+func buildStockGroupXML() string { 
+	return buildGenericMasterXML("STOCKGROUP", "Primary", map[string]string{
+		"PARENT": "",
+		"ISADDABLE": "No",
+	})
+}
 
-func buildGenericLedgerXML(tag, name string) string {
+func buildSalesLedgerXML() string { 
+	return buildGenericMasterXML("LEDGER", "Sales Account", map[string]string{
+		"PARENT": "Sales Accounts",
+		"ISCOSTCENTREON": "No",
+	})
+}
+
+func buildLedgerXML(name string) string { 
+	return buildGenericMasterXML("LEDGER", name, map[string]string{
+		"PARENT": "Sundry Debtors",
+		"ISCOSTCENTREON": "No",
+	})
+}
+
+func buildItemXML(name string) string { 
+	return buildGenericMasterXML("STOCKITEM", name, map[string]string{
+		"PARENT": "Primary",
+		"BASEUNITS": "PIECES",
+	})
+}
+
+func buildGenericMasterXML(tag, name string, extraFields map[string]string) string {
 	doc := etree.NewDocument()
 	env := doc.CreateElement("ENVELOPE")
 	header := env.CreateElement("HEADER")
@@ -466,11 +527,77 @@ func buildGenericLedgerXML(tag, name string) string {
 	entity.CreateAttr("NAME", name)
 	entity.CreateAttr("ACTION", "Create")
 	entity.CreateElement("NAME").SetText(name)
+	
+	// Add extra fields specific to each entity type
+	for key, value := range extraFields {
+		if value != "" {
+			entity.CreateElement(key).SetText(value)
+		}
+	}
+	
 	xml, _ := doc.WriteToString()
 	return xml
 }
 
+// Remove the old buildGenericLedgerXML function since we're using buildGenericMasterXML now
+
 func buildInvoiceXML(invoice map[string]interface{}) (string, error) {
+	// Debug: Log the entire invoice structure
+	invoiceJSON, _ := json.MarshalIndent(invoice, "", "  ")
+	logger.Printf("🔍 Invoice data structure:\n%s", string(invoiceJSON))
+	
+	// Validate required fields
+	if invoice["_id"] == nil {
+		return "", fmt.Errorf("invoice missing _id")
+	}
+	
+	// Check for totalAmount with multiple possible field names
+	var totalAmount interface{}
+	possibleTotalFields := []string{"total", "totalAmount", "amount", "grandTotal", "finalAmount"}
+	
+	for _, field := range possibleTotalFields {
+		if val, exists := invoice[field]; exists && val != nil {
+			totalAmount = val
+			logger.Printf("✅ Found total amount in field '%s': %v", field, totalAmount)
+			break
+		}
+	}
+	
+	if totalAmount == nil {
+		// Try to calculate from items if totalAmount is missing
+		logger.Println("⚠️ totalAmount missing, attempting to calculate from items")
+		if items, ok := invoice["items"].([]interface{}); ok && len(items) > 0 {
+			calculatedTotal := 0.0
+			for _, item := range items {
+				if itemMap, ok := item.(map[string]interface{}); ok {
+					// Check for both 'total' and 'amount' fields
+					var amt interface{}
+					if itemMap["total"] != nil {
+						amt = itemMap["total"]
+					} else if itemMap["amount"] != nil {
+						amt = itemMap["amount"]
+					}
+					
+					if amtFloat, ok := amt.(float64); ok {
+						calculatedTotal += amtFloat
+					}
+				}
+			}
+			if calculatedTotal > 0 {
+				totalAmount = calculatedTotal
+				logger.Printf("✅ Calculated total amount from items: %v", totalAmount)
+			} else {
+				return "", fmt.Errorf("invoice missing totalAmount and could not calculate from items")
+			}
+		} else {
+			return "", fmt.Errorf("invoice missing totalAmount and no items to calculate from")
+		}
+	}
+	
+	if invoice["items"] == nil {
+		return "", fmt.Errorf("invoice missing items")
+	}
+
 	doc := etree.NewDocument()
 	env := doc.CreateElement("ENVELOPE")
 	header := env.CreateElement("HEADER")
@@ -487,13 +614,21 @@ func buildInvoiceXML(invoice map[string]interface{}) (string, error) {
 	tallyMsg.CreateAttr("xmlns:UDF", "TallyUDF")
 
 	vch := tallyMsg.CreateElement("VOUCHER")
-	vch.CreateAttr("REMOTEID", invoice["_id"].(string))
+	vch.CreateAttr("REMOTEID", fmt.Sprintf("%v", invoice["_id"]))
 	vch.CreateAttr("VCHTYPE", "Sales")
 	vch.CreateAttr("ACTION", "Create")
 	vch.CreateAttr("OBJVIEW", "Invoice Voucher View")
 
-	vch.CreateElement("DATE").SetText(formatTallyDate(invoice["date"].(string)))
-	vch.CreateElement("GUID").SetText(invoice["_id"].(string))
+	// Handle date with better error checking - check for invoice_date first
+	dateStr := "20250101" // fallback
+	if dateField, ok := invoice["invoice_date"].(string); ok && dateField != "" {
+		dateStr = formatTallyDate(dateField)
+	} else if dateField, ok := invoice["date"].(string); ok && dateField != "" {
+		dateStr = formatTallyDate(dateField)
+	}
+	vch.CreateElement("DATE").SetText(dateStr)
+	
+	vch.CreateElement("GUID").SetText(fmt.Sprintf("%v", invoice["_id"]))
 	vch.CreateElement("NARRATION").SetText("Sales Invoice")
 	vch.CreateElement("VOUCHERTYPENAME").SetText("Sales")
 	vch.CreateElement("PARTYLEDGERNAME").SetText(getCustomerName(invoice))
@@ -505,32 +640,56 @@ func buildInvoiceXML(invoice map[string]interface{}) (string, error) {
 	ledgerEntry := vch.CreateElement("ALLLEDGERENTRIES.LIST")
 	ledgerEntry.CreateElement("LEDGERNAME").SetText(getCustomerName(invoice))
 	ledgerEntry.CreateElement("ISDEEMEDPOSITIVE").SetText("Yes")
-	ledgerEntry.CreateElement("AMOUNT").SetText(fmt.Sprintf("-%v", invoice["totalAmount"]))
+	ledgerEntry.CreateElement("AMOUNT").SetText(fmt.Sprintf("-%v", totalAmount))
 
 	// Ledger Entry (Sales)
 	salesLedger := vch.CreateElement("ALLLEDGERENTRIES.LIST")
 	salesLedger.CreateElement("LEDGERNAME").SetText("Sales Account")
 	salesLedger.CreateElement("ISDEEMEDPOSITIVE").SetText("No")
-	salesLedger.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", invoice["totalAmount"]))
+	salesLedger.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", totalAmount))
 
-	items := invoice["items"].([]interface{})
-	for _, item := range items {
-		itm := item.(map[string]interface{})
+	// Handle items with better validation
+	items, ok := invoice["items"].([]interface{})
+	if !ok {
+		return "", fmt.Errorf("invalid items format")
+	}
+
+	for i, item := range items {
+		itm, ok := item.(map[string]interface{})
+		if !ok {
+			logger.Printf("⚠️ Skipping invalid item %d in invoice XML", i)
+			continue
+		}
+
+		// Validate required item fields - check for both 'total' and 'amount'
+		var itemAmount interface{}
+		if itm["total"] != nil {
+			itemAmount = itm["total"]
+		} else if itm["amount"] != nil {
+			itemAmount = itm["amount"]
+		} else {
+			logger.Printf("⚠️ Skipping item %d with missing total/amount field", i)
+			continue
+		}
+		
+		if itm["rate"] == nil || itm["quantity"] == nil {
+			logger.Printf("⚠️ Skipping item %d with missing rate or quantity", i)
+			continue
+		}
 
 		invEntry := vch.CreateElement("INVENTORYENTRIES.LIST")
-invEntry.CreateElement("STOCKITEMNAME").SetText(getItemName(itm))
-invEntry.CreateElement("ISDEEMEDPOSITIVE").SetText("No")
-invEntry.CreateElement("RATE").SetText(fmt.Sprintf("%v/PCS", itm["rate"]))
-invEntry.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", itm["amount"]))
-invEntry.CreateElement("ACTUALQTY").SetText(fmt.Sprintf("%v PCS", itm["quantity"]))
-invEntry.CreateElement("BILLEDQTY").SetText(fmt.Sprintf("%v PCS", itm["quantity"]))
-invEntry.CreateElement("BATCHALLOCATIONS.LIST") // Empty but required
+		invEntry.CreateElement("STOCKITEMNAME").SetText(getItemName(itm))
+		invEntry.CreateElement("ISDEEMEDPOSITIVE").SetText("No")
+		invEntry.CreateElement("RATE").SetText(fmt.Sprintf("%v/PCS", itm["rate"]))
+		invEntry.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", itemAmount))
+		invEntry.CreateElement("ACTUALQTY").SetText(fmt.Sprintf("%v PCS", itm["quantity"]))
+		invEntry.CreateElement("BILLEDQTY").SetText(fmt.Sprintf("%v PCS", itm["quantity"]))
+		invEntry.CreateElement("BATCHALLOCATIONS.LIST") // Empty but required
 
-accAlloc := invEntry.CreateElement("ACCOUNTINGALLOCATIONS.LIST")
-accAlloc.CreateElement("LEDGERNAME").SetText("Sales Account")
-accAlloc.CreateElement("ISDEEMEDPOSITIVE").SetText("No")
-accAlloc.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", itm["amount"]))
-
+		accAlloc := invEntry.CreateElement("ACCOUNTINGALLOCATIONS.LIST")
+		accAlloc.CreateElement("LEDGERNAME").SetText("Sales Account")
+		accAlloc.CreateElement("ISDEEMEDPOSITIVE").SetText("No")
+		accAlloc.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", itemAmount))
 	}
 
 	xml, err := doc.WriteToString()
@@ -541,9 +700,20 @@ accAlloc.CreateElement("AMOUNT").SetText(fmt.Sprintf("%v", itm["amount"]))
 }
 
 func formatTallyDate(isoDate string) string {
-	t, err := time.Parse(time.RFC3339, isoDate)
-	if err != nil {
-		return "20250101" // fallback
+	// Try multiple date formats
+	formats := []string{
+		time.RFC3339,
+		"2006-01-02T15:04:05Z",
+		"2006-01-02",
+		"01/02/2006",
 	}
-	return t.Format("20060102")
+	
+	for _, format := range formats {
+		if t, err := time.Parse(format, isoDate); err == nil {
+			return t.Format("20060102")
+		}
+	}
+	
+	logger.Printf("⚠️ Could not parse date '%s', using fallback", isoDate)
+	return "20250101" // fallback
 }
