@@ -669,25 +669,24 @@ function buildReceiptXML(p) {
   voucher.ele('DATE').txt(dateStr);
   voucher.ele('EFFECTIVEDATE').txt(dateStr);
   voucher.ele('VOUCHERTYPENAME').txt('Receipt');
+  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
   voucher.ele('NARRATION').txt(p.notes || '');
 
-  // Cash: debit side (money in)
-  const cashEntry = voucher.ele('LEDGERENTRIES.LIST');
+  // Cash: ALLLEDGERENTRIES.LIST, positive amount, ISDEEMEDPOSITIVE=No
+  const cashEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
   cashEntry.ele('LEDGERNAME').txt('Cash');
-  cashEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
-  cashEntry.ele('ISPARTYLEDGER').txt('No');
-  cashEntry.ele('AMOUNT').txt('-' + amount);
+  cashEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  cashEntry.ele('AMOUNT').txt(String(amount));
 
-  // Customer: credit side (receivable reduced), with bill reference
-  const custEntry = voucher.ele('LEDGERENTRIES.LIST');
+  // Customer: ALLLEDGERENTRIES.LIST, negative amount, ISDEEMEDPOSITIVE=Yes
+  const custEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
   custEntry.ele('LEDGERNAME').txt(customerName);
-  custEntry.ele('ISDEEMEDPOSITIVE').txt('No');
-  custEntry.ele('ISPARTYLEDGER').txt('Yes');
-  custEntry.ele('AMOUNT').txt(String(amount));
+  custEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
+  custEntry.ele('AMOUNT').txt('-' + amount);
   const bill = custEntry.ele('BILLALLOCATIONS.LIST');
-  bill.ele('NAME').txt(p.tally_voucher_number || '');
+  bill.ele('NAME').txt(p.bill_ref || p.tally_voucher_number || '');
   bill.ele('BILLTYPE').txt('Agst Ref');
-  bill.ele('AMOUNT').txt(String(amount));
+  bill.ele('AMOUNT').txt('-' + amount);
 
   return doc.end({ prettyPrint: true });
 }
@@ -758,8 +757,9 @@ async function fetchTallyReceiptNumber(dateStr, partyName, amount) {
       const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
       if (name.toLowerCase() !== partyName.toLowerCase()) continue;
 
-      const partyEntry = [...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)]
-        .find(([, b]) => /<ISPARTYLEDGER>Yes<\/ISPARTYLEDGER>/i.test(b));
+      // Receipt vouchers use ALLLEDGERENTRIES.LIST; customer entry has ISDEEMEDPOSITIVE=No
+      const allEntries = [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)];
+      const partyEntry = allEntries.find(([, b]) => /<ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE>/i.test(b));
       if (partyEntry) {
         const amtMatch = partyEntry[1].match(/<AMOUNT>(.*?)<\/AMOUNT>/);
         const tallyAmt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
@@ -789,14 +789,23 @@ async function paymentLoop() {
       try {
         await ensureCashLedger();
         const xml = buildReceiptXML(p);
+        console.log(`[payment] Receipt XML for ${p._id}:`, xml);
         const tallyRes = await axios.post(TALLY_URL, xml, {
           headers: { 'Content-Type': 'application/xml' }
         });
+
+        console.log(`[payment] Tally response for ${p._id}:`, tallyRes.data);
 
         if (tallyRes.data.includes('Unknown Request'))
           throw new Error('Tally rejected receipt: Unknown Request');
         const lineError = extractLineError(tallyRes.data);
         if (lineError) throw new Error(`Receipt creation failed: ${lineError}`);
+
+        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || tallyRes.data.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i) || [])[1] || 'no detail';
+          throw new Error(`Receipt creation had exceptions: ${detail}`);
+        }
 
         const rawDate = p.date || new Date().toISOString();
         const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
