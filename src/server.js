@@ -88,6 +88,12 @@ app.get("/download", async (req, res) => {
       path.join(buildDir, "agent.js")
     );
 
+    console.log("[download] Copying tally-pull.js...");
+    await fs.copyFile(
+      path.join(__dirname, "templates", "tally-pull.js"),
+      path.join(buildDir, "tally-pull.js")
+    );
+
     console.log("[download] Copying install-service.js...");
     await fs.copyFile(
       path.join(__dirname, "templates", "install-service.js"),

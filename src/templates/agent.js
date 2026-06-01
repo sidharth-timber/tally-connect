@@ -333,17 +333,62 @@ function extractLineError(tallyResponse) {
 }
 
 // 📝 Reports sync status to server
-async function reportStatus(invoiceId, status, errorMsg) {
+async function reportStatus(invoiceId, status, errorMsg, tallyVoucherNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
       companyId: COMPANY_ID,
       event: "sync-status",
-      data: { invoiceId, status, error: errorMsg || "" }
+      data: { invoiceId, status, error: errorMsg || "", tallyVoucherNumber }
     });
   } catch (err) {
     console.error("❌ Failed to report status:", err.message);
   }
+}
+
+async function fetchTallyVoucherNumber(dateStr, partyName, total) {
+  try {
+    const xml = `<?xml version="1.0"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>Day Book</REPORTNAME>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      <SVFROMDATE>${dateStr}</SVFROMDATE>
+      <SVTODATE>${dateStr}</SVTODATE>
+    </STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+
+    const res = await axios.post(TALLY_URL, xml, {
+      headers: { "Content-Type": "application/xml" },
+      timeout: 10000
+    });
+
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+      .filter(([, body]) => /<VOUCHERTYPENAME>\s*Sales\s*<\/VOUCHERTYPENAME>/i.test(body));
+
+    for (const [, body] of blocks) {
+      const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ""; };
+      const name = get("PARTYNAME") || get("PARTYLEDGERNAME");
+      if (name.toLowerCase() !== partyName.toLowerCase()) continue;
+
+      // Match by total: the party ledger entry carries the invoice total as a negative amount
+      const partyEntry = [...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)]
+        .find(([, b]) => /<ISPARTYLEDGER>Yes<\/ISPARTYLEDGER>/i.test(b));
+      if (partyEntry) {
+        const amtMatch = partyEntry[1].match(/<AMOUNT>(.*?)<\/AMOUNT>/);
+        const tallyTotal = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
+        if (tallyTotal !== null && Math.abs(tallyTotal - total) > 1) continue; // >1 tolerance for rounding
+      }
+
+      return get("VOUCHERNUMBER");
+    }
+  } catch (e) {
+    console.error("[agent] fetchTallyVoucherNumber error:", e.message);
+  }
+  return null;
 }
 
 // 🏗️ Build invoice XML matching Tally Prime's own export structure exactly
@@ -656,7 +701,13 @@ async function mainLoop() {
         }
 
         console.log(`✅ Synced invoice ${invoice._id}`);
-        await reportStatus(invoice._id, "success");
+        const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
+        const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
+          .split("T")[0].replace(/-/g, "");
+        const partyName = invoice.customer?.name || invoice.customerName || "";
+        const tallyVoucherNumber = await fetchTallyVoucherNumber(dateStr, partyName, invoice.total);
+        console.log(`[agent] Tally voucher number for ${invoice._id}: ${tallyVoucherNumber}`);
+        await reportStatus(invoice._id, "success", null, tallyVoucherNumber);
       } catch (err) {
         console.error(`❌ Failed to sync invoice ${invoice._id}: ${err.message}`);
         await reportStatus(invoice._id, "error", err.message);
@@ -670,3 +721,5 @@ async function mainLoop() {
 // 🕒 Run every minute
 setInterval(mainLoop, 60 * 1000);
 mainLoop(); // Run immediately on start
+
+require('./tally-pull');
