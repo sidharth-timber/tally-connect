@@ -6,7 +6,11 @@ const { create } = require("xmlbuilder2");
 
 const SERVER_URL = process.env.SERVER_URL;
 const API_KEY = process.env.API_KEY;
-fs.appendFileSync("C:\\TallyAgent-run-log.txt", `${SERVER_URL} agent.js started at ${new Date()}\n`);
+const COMPANY_ID = process.env.COMPANY_ID;
+const TALLY_COMPANY_NAME = process.env.TALLY_COMPANY_NAME || "Company";
+const TALLY_GSTIN = process.env.TALLY_COMPANY_GSTIN || "";
+const TALLY_STATE = process.env.TALLY_COMPANY_STATE || "Kerala";
+fs.appendFileSync(require("path").join(__dirname, "agent-run-log.txt"), `${SERVER_URL} agent.js started at ${new Date()}\n`);
 const TALLY_URL = "http://localhost:9000";
 
 // 🧱 Helper to build unit XML for "PIECES"
@@ -93,9 +97,12 @@ function buildSalesLedgerXML() {
     .end({ prettyPrint: true });
 }
 
-// 🧱 Helper to build item XML with PIECES as unit
-function buildItemXML(itemName) {
-  return create({ version: "1.0" })
+// 🧱 Helper to build item XML with PIECES as unit and GST rate
+function buildItemXML(itemName, gstRate, hsnCode) {
+  const centralRate = (gstRate || 0) / 2;
+  const stateRate = (gstRate || 0) / 2;
+
+  const msg = create({ version: "1.0" })
     .ele("ENVELOPE")
       .ele("HEADER")
         .ele("TALLYREQUEST").txt("Import Data").up()
@@ -112,6 +119,44 @@ function buildItemXML(itemName) {
                 .ele("PARENT").txt("Primary").up()
                 .ele("BASEUNITS").txt("PIECES").up()
                 .ele("ISSTOCKITEM").txt("Yes").up()
+                .ele("HSNDETAILS.LIST")
+                  .ele("APPLICABLEFROM").txt("20010401").up()
+                  .ele("HSNCODE").txt(hsnCode || "").up()
+                  .ele("TAXABILITY").txt("Taxable").up()
+                  .ele("GSTRATE").txt((gstRate || 0).toString()).up()
+                  .ele("INTEGRATEDTAXRATE").txt((gstRate || 0).toString()).up()
+                  .ele("CENTRALTAXRATE").txt(centralRate.toString()).up()
+                  .ele("STATETAXRATE").txt(stateRate.toString()).up()
+                .up()
+              .up()
+            .up()
+          .up()
+        .up()
+      .up()
+    .end({ prettyPrint: true });
+
+  return msg;
+}
+
+// 🧱 Helper to build GST tax ledger XML (CGST / SGST / IGST)
+function buildGSTLedgerXML(name, gstHead) {
+  return create({ version: "1.0" })
+    .ele("ENVELOPE")
+      .ele("HEADER")
+        .ele("TALLYREQUEST").txt("Import Data").up()
+      .up()
+      .ele("BODY")
+        .ele("IMPORTDATA")
+          .ele("REQUESTDESC")
+            .ele("REPORTNAME").txt("All Masters").up()
+          .up()
+          .ele("REQUESTDATA")
+            .ele("TALLYMESSAGE")
+              .ele("LEDGER", { NAME: name, RESERVEDNAME: "" })
+                .ele("NAME").txt(name).up()
+                .ele("PARENT").txt("Duties & Taxes").up()
+                .ele("TAXTYPE").txt("GST").up()
+                .ele("GSTDUTYHEAD").txt(gstHead).up()
               .up()
             .up()
           .up()
@@ -207,7 +252,28 @@ async function ensureMasterData(invoice) {
     console.log("⚠️ Sales ledger creation error:", err.message);
   }
 
-  // 3️⃣ Create or ensure customer ledger
+  // 3️⃣ Create or ensure GST tax ledgers (CGST / SGST / IGST)
+  const gstLedgers = [];
+  if (invoice.cgst > 0) gstLedgers.push({ name: "CGST", head: "Central Tax" });
+  if (invoice.sgst > 0) gstLedgers.push({ name: "SGST", head: "State Tax" });
+  if (invoice.igst > 0) gstLedgers.push({ name: "IGST", head: "Integrated Tax" });
+
+  for (const gst of gstLedgers) {
+    try {
+      const gstXML = buildGSTLedgerXML(gst.name, gst.head);
+      const gstRes = await axios.post(TALLY_URL, gstXML, { headers: { "Content-Type": "application/xml" } });
+      const gstError = extractLineError(gstRes.data);
+      if (gstError && !gstError.toLowerCase().includes("already exists")) {
+        console.log(`⚠️ ${gst.name} ledger creation failed:`, gstError);
+      } else {
+        console.log(`✅ ${gst.name} ledger ensured`);
+      }
+    } catch (err) {
+      console.log(`⚠️ ${gst.name} ledger creation error:`, err.message);
+    }
+  }
+
+  // 5️⃣ Create or ensure customer ledger
   try {
     const customerName = invoice.customer?.name || invoice.customerName || "Unknown Customer";
     const ledgerXML = buildLedgerXML(customerName);
@@ -226,21 +292,33 @@ async function ensureMasterData(invoice) {
     throw err;
   }
 
-  // 4️⃣ Create or ensure each item
+  // 6️⃣ Create or ensure each item (always alter to keep GST rate in sync)
   for (let item of invoice.items) {
     const itemName = item.title || item.name || 'Unknown Item';
     try {
-      const itemXML = buildItemXML(itemName);
+      const itemXML = buildItemXML(itemName, item.gst_rate || 0, item.hsn || "");
       const itemRes = await axios.post(TALLY_URL, itemXML, {
         headers: { "Content-Type": "application/xml" },
       });
-      
+
       const itemError = extractLineError(itemRes.data);
-      if (itemError && !itemError.toLowerCase().includes("already exists")) {
+      if (itemError && itemError.toLowerCase().includes("already exists")) {
+        // Item exists — send Alter to update GST details
+        const alterXML = itemXML.replace(
+          `<STOCKITEM NAME="${itemName}" RESERVEDNAME="">`,
+          `<STOCKITEM NAME="${itemName}" RESERVEDNAME="" ACTION="Alter">`
+        );
+        const alterRes = await axios.post(TALLY_URL, alterXML, {
+          headers: { "Content-Type": "application/xml" },
+        });
+        const alterError = extractLineError(alterRes.data);
+        if (alterError) throw new Error(`Item alter failed: ${alterError}`);
+        console.log(`✅ Item "${itemName}" updated with GST rate`);
+      } else if (itemError) {
         throw new Error(`Item '${itemName}' creation failed: ${itemError}`);
+      } else {
+        console.log(`✅ Item "${itemName}" created with GST rate`);
       }
-      
-      console.log(`✅ Item "${itemName}" ensured`);
     } catch (err) {
       console.error(`❌ Item creation error for "${itemName}":`, err.message);
       throw err;
@@ -259,89 +337,270 @@ async function reportStatus(invoiceId, status, errorMsg) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
+      companyId: COMPANY_ID,
       event: "sync-status",
-      data:{invoiceId,
-      status,
-      error: errorMsg || "",}
+      data: { invoiceId, status, error: errorMsg || "" }
     });
   } catch (err) {
     console.error("❌ Failed to report status:", err.message);
   }
 }
 
-// 🏗️ Build invoice XML with proper structure
-function buildInvoiceXML(invoice) {
-  const dateStr = invoice.invoice_date.split("T")[0].replace(/-/g, "");
+// 🏗️ Build invoice XML matching Tally Prime's own export structure exactly
+function buildInvoiceXML_FULL(invoice) {
+  const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
+  const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
+    .split("T")[0].replace(/-/g, "");
   const customerName = invoice.customer?.name || invoice.customerName || "Unknown Customer";
 
-  // Calculate total from items if not provided
-  let calculatedTotal = 0;
+  const subtotal = invoice.subtotal || invoice.items.reduce((sum, item) => {
+    return sum + (item.quantity || item.qty || 1) * (item.unit_price || item.rate || 0);
+  }, 0);
+  const cgst = invoice.cgst || 0;
+  const sgst = invoice.sgst || 0;
+  const igst = invoice.igst || 0;
+  const total = invoice.total || (subtotal + cgst + sgst + igst);
+
+  const doc = create({ version: "1.0" });
+  const envelope = doc.ele("ENVELOPE");
+  envelope.ele("HEADER").ele("TALLYREQUEST").txt("Import Data");
+
+  const importData = envelope.ele("BODY").ele("IMPORTDATA");
+  importData.ele("REQUESTDESC").ele("REPORTNAME").txt("Vouchers");
+
+  // OBJVIEW is an attribute on VOUCHER — confirmed from Tally's own export
+  const voucher = importData.ele("REQUESTDATA")
+    .ele("TALLYMESSAGE", { "xmlns:UDF": "TallyUDF" })
+    .ele("VOUCHER", { VCHTYPE: "Sales", ACTION: "Create", OBJVIEW: "Invoice Voucher View" });
+
+  voucher.ele("DATE").txt(dateStr);
+  voucher.ele("EFFECTIVEDATE").txt(dateStr);
+  voucher.ele("VOUCHERTYPENAME").txt("Sales");
+  voucher.ele("VOUCHERNUMBER").txt(invoice.invoice_number || "");
+  voucher.ele("PARTYLEDGERNAME").txt(customerName);
+  voucher.ele("PERSISTEDVIEW").txt("Invoice Voucher View");
+  voucher.ele("VCHENTRYMMODE").txt("Item Invoice");
+  voucher.ele("ISGSTOVERRIDDEN").txt("No");
+  voucher.ele("ISINVOICE").txt("Yes");
+  voucher.ele("NARRATION").txt(invoice.notes || "");
+
+  // ALLINVENTORYENTRIES comes FIRST (per Tally's export structure)
+  // Amounts are POSITIVE for inventory/sales/GST, NEGATIVE only for party
   for (const item of invoice.items) {
-    const quantity = item.quantity || 1;
-    const rate = item.unit_price || item.price || item.rate || 0;
-    calculatedTotal += quantity * rate;
-  }
-  const totalAmount = invoice.total || calculatedTotal;
+    const quantity = item.quantity || item.qty || 1;
+    const rate = item.unit_price || item.rate || 0;
+    const itemAmount = quantity * rate;
+    const itemName = item.title || item.name || item.desc || "Unknown Item";
 
-  const xml = create({ version: "1.0" })
-    .ele("ENVELOPE")
-      .ele("HEADER")
-        .ele("TALLYREQUEST").txt("Import Data").up()
-      .up()
-      .ele("BODY")
-        .ele("IMPORTDATA")
-          .ele("REQUESTDESC")
-            .ele("REPORTNAME").txt("Vouchers").up()
-          .up()
-          .ele("REQUESTDATA")
-            .ele("TALLYMESSAGE", { xmlns: "TallyUDF" })
-              .ele("VOUCHER", {
-                VCHTYPE: "Sales",
-                ACTION: "Create",
-                OBJVIEW: "Invoice Voucher View"
-              })
-                .ele("DATE").txt(dateStr).up()
-                .ele("NARRATION").txt(invoice.notes || "Sales Invoice").up()
-                .ele("VOUCHERTYPENAME").txt("Sales").up()
-                .ele("PARTYLEDGERNAME").txt(customerName).up()
-                .ele("PERSISTEDVIEW").txt("Invoice Voucher View").up()
-                .ele("VCHENTRYMODE").txt("Item Invoice").up()
-                
-                // Customer Ledger Entry (Debit)
-                .ele("LEDGERENTRIES.LIST")
-                  .ele("LEDGERNAME").txt(customerName).up()
-                  .ele("ISDEEMEDPOSITIVE").txt("Yes").up()
-                  .ele("AMOUNT").txt(totalAmount.toString()).up()
-                .up()
-                
-                // Sales Account Ledger Entry (Credit)
-                .ele("LEDGERENTRIES.LIST")
-                  .ele("LEDGERNAME").txt("Sales Account").up()
-                  .ele("ISDEEMEDPOSITIVE").txt("No").up()
-                  .ele("AMOUNT").txt("-" + totalAmount.toString()).up();
+    const inv = voucher.ele("ALLINVENTORYENTRIES.LIST");
+    inv.ele("STOCKITEMNAME").txt(itemName);
+    inv.ele("ISDEEMEDPOSITIVE").txt("No");
+    inv.ele("RATE").txt(`${rate}/PIECES`);
+    inv.ele("AMOUNT").txt(itemAmount.toString());           // POSITIVE
+    inv.ele("ACTUALQTY").txt(`${quantity} PIECES`);
+    inv.ele("BILLEDQTY").txt(`${quantity} PIECES`);
 
-  // Get the current voucher element to add inventory entries
-  const currentVoucher = xml.last();
+    // Batch allocation — required by Tally Prime
+    const batch = inv.ele("BATCHALLOCATIONS.LIST");
+    batch.ele("GODOWNNAME").txt("Main Location");
+    batch.ele("BATCHNAME").txt("Primary Batch");
+    batch.ele("AMOUNT").txt(itemAmount.toString());         // POSITIVE
+    batch.ele("ACTUALQTY").txt(`${quantity} PIECES`);
+    batch.ele("BILLEDQTY").txt(`${quantity} PIECES`);
 
-  // Add inventory entries for each item
-  for (const item of invoice.items) {
-    const quantity = item.quantity || 1;
-    const rate = item.unit_price || item.price || item.rate || 0;
-    const amount = quantity * rate;
-    const itemName = item.title || item.name || "Unknown Item";
+    // Sales Account inside the item allocation (POSITIVE)
+    const salesAlloc = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+    salesAlloc.ele("LEDGERNAME").txt("Sales Account");
+    salesAlloc.ele("ISDEEMEDPOSITIVE").txt("No");
+    salesAlloc.ele("ISPARTYLEDGER").txt("No");
+    salesAlloc.ele("AMOUNT").txt(itemAmount.toString());    // POSITIVE
 
-    currentVoucher
-      .ele("INVENTORYENTRIES.LIST")
-        .ele("STOCKITEMNAME").txt(itemName).up()
-        .ele("ISDEEMEDPOSITIVE").txt("No").up()
-        .ele("RATE").txt(rate.toString()).up()
-        .ele("AMOUNT").txt("-" + amount.toString()).up()
-        .ele("ACTUALQTY").txt(`${quantity} PIECES`).up()
-        .ele("BILLEDQTY").txt(`${quantity} PIECES`).up()
-      .up();
+    // CGST inside item allocation (POSITIVE)
+    if (cgst > 0) {
+      const e = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+      e.ele("LEDGERNAME").txt("CGST");
+      e.ele("ISDEEMEDPOSITIVE").txt("No");
+      e.ele("ISPARTYLEDGER").txt("No");
+      e.ele("AMOUNT").txt(cgst.toString());                 // POSITIVE
+    }
+    // SGST inside item allocation (POSITIVE)
+    if (sgst > 0) {
+      const e = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+      e.ele("LEDGERNAME").txt("SGST");
+      e.ele("ISDEEMEDPOSITIVE").txt("No");
+      e.ele("ISPARTYLEDGER").txt("No");
+      e.ele("AMOUNT").txt(sgst.toString());                 // POSITIVE
+    }
+    // IGST inside item allocation (POSITIVE)
+    if (igst > 0) {
+      const e = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+      e.ele("LEDGERNAME").txt("IGST");
+      e.ele("ISDEEMEDPOSITIVE").txt("No");
+      e.ele("ISPARTYLEDGER").txt("No");
+      e.ele("AMOUNT").txt(igst.toString());                 // POSITIVE
+    }
   }
 
-  return xml.end({ prettyPrint: true });
+  // LEDGERENTRIES comes AFTER inventory — party entry only, amount NEGATIVE
+  const custEntry = voucher.ele("LEDGERENTRIES.LIST");
+  custEntry.ele("LEDGERNAME").txt(customerName);
+  custEntry.ele("ISDEEMEDPOSITIVE").txt("Yes");
+  custEntry.ele("ISPARTYLEDGER").txt("Yes");
+  custEntry.ele("AMOUNT").txt("-" + total.toString());      // NEGATIVE
+
+  // Bill reference for receivables tracking
+  const bill = custEntry.ele("BILLALLOCATIONS.LIST");
+  bill.ele("NAME").txt(invoice.invoice_number || "");
+  bill.ele("BILLTYPE").txt("New Ref");
+  bill.ele("AMOUNT").txt("-" + total.toString());           // NEGATIVE
+
+  return doc.end({ prettyPrint: true });
+}
+
+// 🏗️ Build invoice XML matching Tally's "GST Invoice" voucher type export exactly
+function buildInvoiceXML(invoice) {
+  const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
+  const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
+    .split("T")[0].replace(/-/g, "");
+  const customerName = invoice.customer?.name || invoice.customerName || "Unknown Customer";
+  const voucherNumber = invoice.invoice_number || "";
+
+  const subtotal = invoice.subtotal || (invoice.items || []).reduce((sum, item) => {
+    return sum + (item.quantity || item.qty || 1) * (item.unit_price || item.rate || 0);
+  }, 0);
+  const cgst = invoice.cgst || 0;
+  const sgst = invoice.sgst || 0;
+  const igst = invoice.igst || 0;
+  const total = invoice.total || (subtotal + cgst + sgst + igst);
+
+  const doc = create({ version: "1.0" });
+  const envelope = doc.ele("ENVELOPE");
+  envelope.ele("HEADER").ele("TALLYREQUEST").txt("Import Data");
+  const importData = envelope.ele("BODY").ele("IMPORTDATA");
+  importData.ele("REQUESTDESC").ele("REPORTNAME").txt("Vouchers");
+
+  const voucher = importData.ele("REQUESTDATA")
+    .ele("TALLYMESSAGE", { "xmlns:UDF": "TallyUDF" })
+    .ele("VOUCHER", { VCHTYPE: "Sales", ACTION: "Create", OBJVIEW: "Invoice Voucher View" });
+
+  voucher.ele("DATE").txt(dateStr);
+  voucher.ele("EFFECTIVEDATE").txt(dateStr);
+  voucher.ele("GSTREGISTRATIONTYPE").txt("Regular");
+  voucher.ele("STATENAME").txt(TALLY_STATE);
+  voucher.ele("COUNTRYOFRESIDENCE").txt("India");
+  voucher.ele("PLACEOFSUPPLY").txt(TALLY_STATE);
+  voucher.ele("VOUCHERTYPENAME").txt("Sales");
+  voucher.ele("PARTYNAME").txt(customerName);
+  voucher.ele("CMPGSTIN").txt(TALLY_GSTIN);
+  voucher.ele("PARTYLEDGERNAME").txt(customerName);
+  voucher.ele("VOUCHERNUMBER").txt(voucherNumber);
+  voucher.ele("BASICBUYERNAME").txt(customerName);
+  voucher.ele("CMPGSTREGISTRATIONTYPE").txt("Regular");
+  voucher.ele("PARTYMAILINGNAME").txt(customerName);
+  voucher.ele("CONSIGNEEMAILINGNAME").txt(customerName);
+  voucher.ele("CONSIGNEESTATENAME").txt(TALLY_STATE);
+  voucher.ele("CMPGSTSTATE").txt(TALLY_STATE);
+  voucher.ele("CONSIGNEECOUNTRYNAME").txt("India");
+  voucher.ele("BASICBASEPARTYNAME").txt(customerName);
+  voucher.ele("PERSISTEDVIEW").txt("Invoice Voucher View");
+  voucher.ele("VCHENTRYMODE").txt("Item Invoice");
+  voucher.ele("ISGSTOVERRIDDEN").txt("No");
+  voucher.ele("ISINVOICE").txt("Yes");
+  voucher.ele("VCHGSTSTATUSISUNCERTAIN").txt("Yes");
+  voucher.ele("VCHGSTSTATUSISAPPLICABLE").txt("Yes");
+  voucher.ele("NARRATION").txt(invoice.notes || "");
+
+  // Inventory entries FIRST — Sales Account only in ACCOUNTINGALLOCATIONS
+  for (const item of (invoice.items || [])) {
+    const quantity = item.quantity || item.qty || 1;
+    const rate = item.unit_price || item.rate || 0;
+    const itemAmount = quantity * rate;
+    const itemName = item.title || item.name || item.desc || "Unknown Item";
+    const gstRate = item.gst_rate || 0;
+
+    const inv = voucher.ele("ALLINVENTORYENTRIES.LIST");
+    inv.ele("STOCKITEMNAME").txt(itemName);
+    inv.ele("ISDEEMEDPOSITIVE").txt("No");
+    inv.ele("RATE").txt(`${rate}/PIECES`);
+    inv.ele("AMOUNT").txt(itemAmount.toString());
+    inv.ele("ACTUALQTY").txt(`${quantity} PIECES`);
+    inv.ele("BILLEDQTY").txt(`${quantity} PIECES`);
+
+    const batch = inv.ele("BATCHALLOCATIONS.LIST");
+    batch.ele("GODOWNNAME").txt("Main Location");
+    batch.ele("BATCHNAME").txt("Primary Batch");
+    batch.ele("AMOUNT").txt(itemAmount.toString());
+    batch.ele("ACTUALQTY").txt(`${quantity} PIECES`);
+    batch.ele("BILLEDQTY").txt(`${quantity} PIECES`);
+
+    const salesAlloc = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+    salesAlloc.ele("LEDGERNAME").txt("Sales Account");
+    salesAlloc.ele("ISDEEMEDPOSITIVE").txt("No");
+    salesAlloc.ele("ISPARTYLEDGER").txt("No");
+    salesAlloc.ele("AMOUNT").txt(itemAmount.toString());
+
+    // GST rate details on the item (as per Tally's own export)
+    const cgstRateEntry = inv.ele("RATEDETAILS.LIST");
+    cgstRateEntry.ele("GSTRATEDUTYHEAD").txt("CGST");
+    cgstRateEntry.ele("GSTRATEVALUATIONTYPE").txt("Based on Value");
+    cgstRateEntry.ele("GSTRATE").txt((gstRate / 2).toString());
+
+    const sgstRateEntry = inv.ele("RATEDETAILS.LIST");
+    sgstRateEntry.ele("GSTRATEDUTYHEAD").txt("SGST/UTGST");
+    sgstRateEntry.ele("GSTRATEVALUATIONTYPE").txt("Based on Value");
+    sgstRateEntry.ele("GSTRATE").txt((gstRate / 2).toString());
+
+    const igstRateEntry = inv.ele("RATEDETAILS.LIST");
+    igstRateEntry.ele("GSTRATEDUTYHEAD").txt("IGST");
+    igstRateEntry.ele("GSTRATEVALUATIONTYPE").txt("Based on Value");
+    igstRateEntry.ele("GSTRATE").txt(gstRate.toString());
+  }
+
+  // Customer ledger AFTER inventory — NEGATIVE amount
+  const custEntry = voucher.ele("LEDGERENTRIES.LIST");
+  custEntry.ele("LEDGERNAME").txt(customerName);
+  custEntry.ele("ISDEEMEDPOSITIVE").txt("Yes");
+  custEntry.ele("ISPARTYLEDGER").txt("Yes");
+  custEntry.ele("AMOUNT").txt("-" + total.toString());
+  const bill = custEntry.ele("BILLALLOCATIONS.LIST");
+  bill.ele("NAME").txt(voucherNumber);
+  bill.ele("BILLTYPE").txt("New Ref");
+  bill.ele("AMOUNT").txt("-" + total.toString());
+
+  // CGST — POSITIVE (comes before SGST, per Tally's own export)
+  if (cgst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("CGST");
+    e.ele("ISDEEMEDPOSITIVE").txt("No");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("REMOVEZEROENTRIES").txt("No");
+    e.ele("AMOUNT").txt(cgst.toString());
+    e.ele("VATEXPAMOUNT").txt(cgst.toString());
+  }
+
+  // SGST — POSITIVE
+  if (sgst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("SGST");
+    e.ele("ISDEEMEDPOSITIVE").txt("No");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("REMOVEZEROENTRIES").txt("No");
+    e.ele("AMOUNT").txt(sgst.toString());
+    e.ele("VATEXPAMOUNT").txt(sgst.toString());
+  }
+
+  // IGST — POSITIVE
+  if (igst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("IGST");
+    e.ele("ISDEEMEDPOSITIVE").txt("No");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("REMOVEZEROENTRIES").txt("No");
+    e.ele("AMOUNT").txt(igst.toString());
+    e.ele("VATEXPAMOUNT").txt(igst.toString());
+  }
+
+  return doc.end({ prettyPrint: true });
 }
 
 // 🔄 Main loop
@@ -349,6 +608,7 @@ async function mainLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
+      companyId: COMPANY_ID,
       event: "sync-request",
     });
 
@@ -369,6 +629,11 @@ async function mainLoop() {
 
         console.log("📥 Invoice response:", tallyRes.data);
         require("fs").writeFileSync("invoice.xml", xml);
+        require("fs").writeFileSync("tally-response.xml", tallyRes.data);
+
+        if (tallyRes.data.includes("Unknown Request")) {
+          throw new Error("Tally rejected the request: Unknown Request — check XML structure or ensure a company is open in Tally Prime");
+        }
 
         const invoiceError = extractLineError(tallyRes.data);
         if (invoiceError) {
@@ -381,15 +646,13 @@ async function mainLoop() {
         const exceptions = exceptionsMatch ? parseInt(exceptionsMatch[1]) : 0;
         
         if (exceptions > 0) {
-          console.log("⚠️ Invoice created with exceptions. Response:", responseText);
-          const errorMatch = responseText.match(/<e>(.*?)<\/ERROR>/);
-          const exceptionMatch = responseText.match(/<EXCEPTION>(.*?)<\/EXCEPTION>/);
-          
-          if (errorMatch || exceptionMatch) {
-            throw new Error(`Invoice creation had exceptions: ${errorMatch?.[1] || exceptionMatch?.[1]}`);
-          } else {
-            console.log("⚠️ Invoice created but with unknown exceptions");
-          }
+          const errorMatch = responseText.match(/<ERROR>(.*?)<\/ERROR>/i);
+          const exceptionMatch = responseText.match(/<EXCEPTION>(.*?)<\/EXCEPTION>/i);
+          const errListMatch = responseText.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i);
+          const detail = errorMatch?.[1] || exceptionMatch?.[1] || errListMatch?.[1]?.trim() || "no detail returned by Tally";
+          console.log(`⚠️ Invoice exception detail: ${detail}`);
+          console.log("⚠️ Full Tally response:", responseText);
+          throw new Error(`Invoice creation had exceptions: ${detail}`);
         }
 
         console.log(`✅ Synced invoice ${invoice._id}`);
@@ -400,7 +663,7 @@ async function mainLoop() {
       }
     }
   } catch (err) {
-    console.error("❌ Agent loop error:", err.message);
+    console.error("❌ Agent loop error:", err.response?.data?.message || err.message);
   }
 }
 
