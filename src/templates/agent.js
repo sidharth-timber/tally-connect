@@ -648,6 +648,172 @@ function buildInvoiceXML(invoice) {
   return doc.end({ prettyPrint: true });
 }
 
+// 🧾 Build Receipt voucher XML (Timber → Tally payment)
+function buildReceiptXML(p) {
+  const rawDate = p.date || new Date().toISOString();
+  const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+    .split('T')[0].replace(/-/g, '');
+  const customerName = p.customer_name || 'Unknown Customer';
+  const amount = p.amount || 0;
+
+  const doc = create({ version: '1.0' });
+  const envelope = doc.ele('ENVELOPE');
+  envelope.ele('HEADER').ele('TALLYREQUEST').txt('Import Data');
+  const importData = envelope.ele('BODY').ele('IMPORTDATA');
+  importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
+
+  const voucher = importData.ele('REQUESTDATA')
+    .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
+    .ele('VOUCHER', { VCHTYPE: 'Receipt', ACTION: 'Create' });
+
+  voucher.ele('DATE').txt(dateStr);
+  voucher.ele('EFFECTIVEDATE').txt(dateStr);
+  voucher.ele('VOUCHERTYPENAME').txt('Receipt');
+  voucher.ele('NARRATION').txt(p.notes || '');
+
+  // Cash: debit side (money in)
+  const cashEntry = voucher.ele('LEDGERENTRIES.LIST');
+  cashEntry.ele('LEDGERNAME').txt('Cash');
+  cashEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
+  cashEntry.ele('ISPARTYLEDGER').txt('No');
+  cashEntry.ele('AMOUNT').txt('-' + amount);
+
+  // Customer: credit side (receivable reduced), with bill reference
+  const custEntry = voucher.ele('LEDGERENTRIES.LIST');
+  custEntry.ele('LEDGERNAME').txt(customerName);
+  custEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  custEntry.ele('ISPARTYLEDGER').txt('Yes');
+  custEntry.ele('AMOUNT').txt(String(amount));
+  const bill = custEntry.ele('BILLALLOCATIONS.LIST');
+  bill.ele('NAME').txt(p.tally_voucher_number || '');
+  bill.ele('BILLTYPE').txt('Agst Ref');
+  bill.ele('AMOUNT').txt(String(amount));
+
+  return doc.end({ prettyPrint: true });
+}
+
+async function ensureCashLedger() {
+  const xml = create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: 'Cash', RESERVEDNAME: '' })
+            .ele('NAME').txt('Cash').up()
+            .ele('PARENT').txt('Cash-in-Hand').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+  try {
+    const res = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) {
+      console.log('⚠️ Cash ledger creation failed:', err);
+    }
+  } catch (e) {
+    console.log('⚠️ Cash ledger creation error:', e.message);
+  }
+}
+
+async function reportPaymentStatus(paymentId, status, errorMsg, receiptNumber) {
+  try {
+    await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY,
+      companyId: COMPANY_ID,
+      event: 'payment-sync-status',
+      data: { paymentId, status, error: errorMsg || '', receiptNumber }
+    });
+  } catch (err) {
+    console.error('❌ Failed to report payment status:', err.message);
+  }
+}
+
+async function fetchTallyReceiptNumber(dateStr, partyName, amount) {
+  try {
+    const xml = `<?xml version="1.0"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>Day Book</REPORTNAME>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      <SVFROMDATE>${dateStr}</SVFROMDATE>
+      <SVTODATE>${dateStr}</SVTODATE>
+    </STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+
+    const res = await axios.post(TALLY_URL, xml, {
+      headers: { 'Content-Type': 'application/xml' },
+      timeout: 10000
+    });
+
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+      .filter(([, body]) => /<VOUCHERTYPENAME>\s*Receipt\s*<\/VOUCHERTYPENAME>/i.test(body));
+
+    for (const [, body] of blocks) {
+      const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+      if (name.toLowerCase() !== partyName.toLowerCase()) continue;
+
+      const partyEntry = [...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)]
+        .find(([, b]) => /<ISPARTYLEDGER>Yes<\/ISPARTYLEDGER>/i.test(b));
+      if (partyEntry) {
+        const amtMatch = partyEntry[1].match(/<AMOUNT>(.*?)<\/AMOUNT>/);
+        const tallyAmt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
+        if (tallyAmt !== null && Math.abs(tallyAmt - amount) > 1) continue;
+      }
+
+      return get('VOUCHERNUMBER');
+    }
+  } catch (e) {
+    console.error('[agent] fetchTallyReceiptNumber error:', e.message);
+  }
+  return null;
+}
+
+async function paymentLoop() {
+  try {
+    const res = await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY,
+      companyId: COMPANY_ID,
+      event: 'payment-sync-request'
+    });
+
+    const payments = res.data.payments || [];
+    console.log(`💰 Processing ${payments.length} payment(s)`);
+
+    for (const p of payments) {
+      try {
+        await ensureCashLedger();
+        const xml = buildReceiptXML(p);
+        const tallyRes = await axios.post(TALLY_URL, xml, {
+          headers: { 'Content-Type': 'application/xml' }
+        });
+
+        if (tallyRes.data.includes('Unknown Request'))
+          throw new Error('Tally rejected receipt: Unknown Request');
+        const lineError = extractLineError(tallyRes.data);
+        if (lineError) throw new Error(`Receipt creation failed: ${lineError}`);
+
+        const rawDate = p.date || new Date().toISOString();
+        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+          .split('T')[0].replace(/-/g, '');
+        const receiptNumber = await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount);
+        console.log(`✅ Payment ${p._id} synced, receipt: ${receiptNumber}`);
+        await reportPaymentStatus(p._id, 'success', null, receiptNumber);
+      } catch (err) {
+        console.error(`❌ Payment ${p._id} failed:`, err.message);
+        await reportPaymentStatus(p._id, 'error', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Payment loop error:', err.response?.data?.message || err.message);
+  }
+}
+
 // 🔄 Main loop
 async function mainLoop() {
   try {
@@ -720,6 +886,8 @@ async function mainLoop() {
 
 // 🕒 Run every minute
 setInterval(mainLoop, 60 * 1000);
-mainLoop(); // Run immediately on start
+setInterval(paymentLoop, 60 * 1000);
+mainLoop();
+paymentLoop();
 
 require('./tally-pull');

@@ -101,6 +101,37 @@ function parseVouchers(xml) {
     }).filter(v => v.voucher_number);
 }
 
+function parseReceipts(xml) {
+    const results = [];
+    const receiptBlocks = [...xml.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+        .filter(([, body]) => /<VOUCHERTYPENAME>\s*Receipt\s*<\/VOUCHERTYPENAME>/i.test(body));
+
+    for (const [, body] of receiptBlocks) {
+        const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+        const receipt_number = get('VOUCHERNUMBER');
+        const date = get('DATE');
+        const party_name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+        if (!receipt_number) continue;
+
+        // Receipt vouchers use ALLLEDGERENTRIES.LIST; Sales vouchers use LEDGERENTRIES.LIST
+        const ledgerEntries = [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)];
+
+        for (const [, partyBody] of ledgerEntries) {
+            const billAllocs = [...partyBody.matchAll(/<BILLALLOCATIONS\.LIST>([\s\S]*?)<\/BILLALLOCATIONS\.LIST>/g)];
+            for (const [, allocBody] of billAllocs) {
+                const ga = tag => { const m = allocBody.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+                const invoice_voucher_number = ga('NAME');
+                const billType = ga('BILLTYPE');
+                const amount = Math.abs(parseTallyAmt(ga('AMOUNT')));
+                if (!invoice_voucher_number || amount <= 0) continue;
+                if (billType && billType !== 'Agst Ref' && billType !== 'On Account') continue;
+                results.push({ receipt_number, date, party_name, invoice_voucher_number, amount });
+            }
+        }
+    }
+    return results;
+}
+
 async function pullLoop() {
     try {
         const to = new Date();
@@ -128,6 +159,23 @@ async function pullLoop() {
                 console.log(`[pull] ${v.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
             } catch (e) {
                 console.error(`[pull] ${v.voucher_number} failed:`, e.message);
+            }
+        }
+
+        const receipts = parseReceipts(tallyRes.data);
+        console.log(`[pull] ${receipts.length} Receipt allocation(s) found in Tally`);
+
+        for (const r of receipts) {
+            try {
+                const resp = await axios.post(`${SERVER_URL}/webhook`, {
+                    apiKey: API_KEY,
+                    companyId: COMPANY_ID,
+                    event: 'tally-receipt',
+                    data: r
+                });
+                console.log(`[pull] receipt ${r.receipt_number} → inv ${r.invoice_voucher_number}: ${resp.data.imported ? 'imported' : resp.data.reason}`);
+            } catch (e) {
+                console.error(`[pull] receipt ${r.receipt_number} failed:`, e.message);
             }
         }
     } catch (e) {
