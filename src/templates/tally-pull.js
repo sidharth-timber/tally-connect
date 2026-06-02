@@ -139,7 +139,26 @@ function parsePurchases(xml) {
     return purchaseBlocks.map(([, body]) => {
         const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
 
-        // Purchase vouchers may use LEDGERENTRIES.LIST (invoice type) or ALLLEDGERENTRIES.LIST (accounting type)
+        // Parse inventory entries (Item Invoice mode)
+        const invBlocks = [...body.matchAll(/<ALLINVENTORYENTRIES\.LIST>([\s\S]*?)<\/ALLINVENTORYENTRIES\.LIST>/g)]
+            .map(([, b]) => {
+                const g = t => { const m = b.match(new RegExp(`<${t}>(.*?)<\\/${t}>`)); return m ? m[1].trim() : ''; };
+                // Unit is embedded in BILLEDQTY as "1 PIECES" or in RATE as "100/PIECES"
+                const billedQtyStr = g('BILLEDQTY');
+                const unitMatch = billedQtyStr.match(/[\d.]+\s+(\S+)/);
+                const unit = unitMatch ? unitMatch[1] : 'PIECES';
+                return {
+                    name:   g('STOCKITEMNAME'),
+                    qty:    parseTallyQty(billedQtyStr),
+                    rate:   parseTallyAmt(g('RATE')),
+                    amount: Math.abs(parseTallyAmt(g('AMOUNT'))),
+                    hsn:    g('HSNCODE'),
+                    unit,
+                };
+            })
+            .filter(i => i.name);
+
+        // Parse top-level ledger entries (both tag variants)
         const allLedgers = [
             ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
             ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
@@ -148,20 +167,26 @@ function parsePurchases(xml) {
             return { ledger: g('LEDGERNAME'), amount: g('AMOUNT') };
         });
 
-        const cgst    = sumLedger(allLedgers, 'CGST');
-        const sgst    = sumLedger(allLedgers, 'SGST');
-        const igst    = sumLedger(allLedgers, 'IGST');
-        // Taxable = purchase/expense ledger amount (positive entry in Purchase)
-        const taxable = allLedgers
+        const cgst = sumLedger(allLedgers, 'CGST');
+        const sgst = sumLedger(allLedgers, 'SGST');
+        const igst = sumLedger(allLedgers, 'IGST');
+
+        // For Item Invoice mode: taxable comes from inventory entry amounts
+        // For accounting mode: taxable comes from purchase/expense ledger entries
+        const taxableFromInv = invBlocks.reduce((s, i) => s + i.amount, 0);
+        const taxableFromLedger = allLedgers
             .filter(e => /purchase/i.test(e.ledger) || /expense/i.test(e.ledger))
             .reduce((s, e) => s + Math.abs(parseTallyAmt(e.amount)), 0);
+        const taxable = taxableFromInv || taxableFromLedger;
         const total = taxable + cgst + sgst + igst;
 
         return {
-            voucher_number: get('VOUCHERNUMBER'),
-            date:           get('DATE'),
-            party_name:     get('PARTYNAME') || get('PARTYLEDGERNAME'),
-            gstin:          get('PARTYGSTIN'),
+            voucher_number:       get('VOUCHERNUMBER'),
+            date:                 get('DATE'),
+            party_name:           get('PARTYNAME') || get('PARTYLEDGERNAME'),
+            gstin:                get('PARTYGSTIN'),
+            is_inventory_purchase: invBlocks.length > 0,
+            line_items:           invBlocks,
             taxable,
             cgst,
             sgst,
@@ -170,6 +195,35 @@ function parsePurchases(xml) {
             narration: get('NARRATION')
         };
     }).filter(v => v.voucher_number && v.party_name);
+}
+
+function parsePayments(xml) {
+    const results = [];
+    const paymentBlocks = [...xml.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+        .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
+
+    for (const [, body] of paymentBlocks) {
+        const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+        const payment_number = get('VOUCHERNUMBER');
+        const date = get('DATE');
+        const party_name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+        if (!payment_number) continue;
+
+        const ledgerEntries = [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)];
+        for (const [, partyBody] of ledgerEntries) {
+            const billAllocs = [...partyBody.matchAll(/<BILLALLOCATIONS\.LIST>([\s\S]*?)<\/BILLALLOCATIONS\.LIST>/g)];
+            for (const [, allocBody] of billAllocs) {
+                const ga = tag => { const m = allocBody.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+                const bill_voucher_number = ga('NAME');
+                const billType = ga('BILLTYPE');
+                const amount = Math.abs(parseTallyAmt(ga('AMOUNT')));
+                if (!bill_voucher_number || amount <= 0) continue;
+                if (billType && billType !== 'Agst Ref' && billType !== 'On Account') continue;
+                results.push({ payment_number, date, party_name, bill_voucher_number, amount });
+            }
+        }
+    }
+    return results;
 }
 
 async function pullLoop() {
@@ -212,6 +266,19 @@ async function pullLoop() {
                 console.log(`[pull] purchase ${p.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
             } catch (e) {
                 console.error(`[pull] purchase ${p.voucher_number} failed:`, e.message);
+            }
+        }
+
+        const vendor_payments = parsePayments(tallyRes.data);
+        console.log(`[pull] ${vendor_payments.length} Payment voucher(s) found in Tally`);
+        for (const p of vendor_payments) {
+            try {
+                const r = await axios.post(`${SERVER_URL}/webhook`, {
+                    apiKey: API_KEY, companyId: COMPANY_ID, event: 'tally-payment', data: p
+                });
+                console.log(`[pull] payment ${p.payment_number} → bill ${p.bill_voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
+            } catch (e) {
+                console.error(`[pull] payment ${p.payment_number} failed:`, e.message);
             }
         }
 

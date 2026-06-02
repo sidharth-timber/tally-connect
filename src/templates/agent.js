@@ -718,6 +718,13 @@ function buildPurchaseAccountXML() {
           .ele('LEDGER', { NAME: 'Purchase Account', RESERVEDNAME: '' })
             .ele('NAME').txt('Purchase Account').up()
             .ele('PARENT').txt('Purchase Accounts').up()
+            .ele('ISREVENUE').txt('Yes').up()
+            .ele('AFFECTSGST').txt('No').up()
+            .ele('ISDEEMEDPOSITIVE').txt('Yes').up()
+            .ele('USEFORVAT').txt('No').up()
+            .ele('ISPARTYLEDGER').txt('No').up()
+            .ele('ISBILLWISEON').txt('No').up()
+            .ele('ISINACTIVE').txt('No').up()
           .up()
         .up().up()
       .up()
@@ -744,12 +751,42 @@ function buildGSTInputLedgerXML(name, head) {
 
 async function ensurePurchaseMasterData(bill) {
   const vendorName = bill.vendor_name || 'Unknown Vendor';
+  const lineItems = (bill.line_items || []).filter(i => i.qty > 0 || i.amount > 0);
+
   // Purchase Account ledger
   try {
     const res = await axios.post(TALLY_URL, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
+    console.log('[bill] Purchase Account creation response:', res.data);
     const err = extractLineError(res.data);
     if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Purchase Account ledger:', err);
+    else console.log('✅ Purchase Account ledger ensured');
   } catch (e) { console.log('⚠️ Purchase Account error:', e.message); }
+
+  // PIECES unit (needed for inventory entries)
+  try {
+    const res = await axios.post(TALLY_URL, buildUnitXML(), { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Unit PIECES:', err);
+  } catch (e) { console.log('⚠️ Unit PIECES error:', e.message); }
+
+  // Stock items — use real line items if available, else fall back to generic
+  const itemsToCreate = lineItems.length > 0
+    ? lineItems.map(i => ({
+        name: i.name || i.sku || i.product_name || bill.description || 'Purchase',
+        gstRate: i.gst_rate || bill.gst_rate || 0,
+        hsn: i.hsn_code || i.hsn || ''
+      }))
+    : [{ name: bill.description || bill.bill_no || 'Purchase', gstRate: bill.gst_rate || 0, hsn: '' }];
+
+  for (const item of itemsToCreate) {
+    try {
+      const itemXML = buildItemXML(item.name, item.gstRate, item.hsn);
+      const itemRes = await axios.post(TALLY_URL, itemXML, { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(itemRes.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ Item "${item.name}":`, err);
+      else console.log(`✅ Item "${item.name}" ensured`);
+    } catch (e) { console.log(`⚠️ Item "${item.name}" error:`, e.message); }
+  }
 
   // GST Input ledgers
   const inputLedgers = [];
@@ -783,6 +820,16 @@ function buildPurchaseXML(bill) {
   const sgst = bill.sgst || 0;
   const igst = bill.igst || 0;
   const total = bill.total_amount || (taxable + cgst + sgst + igst);
+  const billNo = bill.bill_no || '';
+  const lineItems = (bill.line_items || []).filter(i => i.qty > 0 || i.amount > 0);
+
+  // Normalise to inventory rows (fallback: single row with full taxable)
+  const invRows = lineItems.length > 0 ? lineItems : [{
+    name: bill.description || billNo || 'Purchase',
+    qty: 1,
+    rate: taxable,
+    amount: taxable
+  }];
 
   const doc = create({ version: '1.0' });
   const envelope = doc.ele('ENVELOPE');
@@ -790,51 +837,82 @@ function buildPurchaseXML(bill) {
   const importData = envelope.ele('BODY').ele('IMPORTDATA');
   importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
 
+  // OBJVIEW must match PERSISTEDVIEW for Invoice Voucher View to work on import
   const voucher = importData.ele('REQUESTDATA')
     .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
-    .ele('VOUCHER', { VCHTYPE: 'Purchase', ACTION: 'Create' });
+    .ele('VOUCHER', { VCHTYPE: 'Purchase', ACTION: 'Create', OBJVIEW: 'Invoice Voucher View' });
 
   voucher.ele('DATE').txt(dateStr);
   voucher.ele('EFFECTIVEDATE').txt(dateStr);
   voucher.ele('VOUCHERTYPENAME').txt('Purchase');
-  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
-  voucher.ele('NARRATION').txt(bill.description || bill.bill_no || '');
+  voucher.ele('PARTYNAME').txt(vendorName);
+  voucher.ele('PARTYLEDGERNAME').txt(vendorName);
+  voucher.ele('PERSISTEDVIEW').txt('Invoice Voucher View');
+  voucher.ele('VCHENTRYMODE').txt('Item Invoice');
+  voucher.ele('ISINVOICE').txt('Yes');
+  voucher.ele('NARRATION').txt(bill.description || billNo || '');
 
-  // Purchase Account (Dr): ISDEEMEDPOSITIVE=Yes, AMOUNT=-taxable
-  const purchEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
-  purchEntry.ele('LEDGERNAME').txt('Purchase Account');
-  purchEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
-  purchEntry.ele('AMOUNT').txt('-' + taxable);
+  // Inventory entries — signs follow Tally's own export:
+  // ISDEEMEDPOSITIVE=Yes + negative AMOUNT for purchase/debit side
+  for (const item of invRows) {
+    const itemName = item.name || item.sku || item.product_name || bill.description || 'Purchase';
+    const unit = (item.unit || 'PIECES').toUpperCase();
 
-  // GST Input ledgers (Dr)
+    const inv = voucher.ele('ALLINVENTORYENTRIES.LIST');
+    inv.ele('STOCKITEMNAME').txt(itemName);
+    inv.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    inv.ele('RATE').txt(item.rate + '/' + unit);
+    inv.ele('AMOUNT').txt('-' + item.amount);
+    inv.ele('ACTUALQTY').txt(item.qty + ' ' + unit);
+    inv.ele('BILLEDQTY').txt(item.qty + ' ' + unit);
+
+    const batch = inv.ele('BATCHALLOCATIONS.LIST');
+    batch.ele('GODOWNNAME').txt('Main Location');
+    batch.ele('BATCHNAME').txt('Primary Batch');
+    batch.ele('AMOUNT').txt('-' + item.amount);
+    batch.ele('ACTUALQTY').txt(item.qty + ' ' + unit);
+    batch.ele('BILLEDQTY').txt(item.qty + ' ' + unit);
+
+    const acct = inv.ele('ACCOUNTINGALLOCATIONS.LIST');
+    acct.ele('LEDGERNAME').txt('Purchase Account');
+    acct.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    acct.ele('ISPARTYLEDGER').txt('No');
+    acct.ele('AMOUNT').txt('-' + item.amount);
+  }
+
+  // Vendor (Cr): LEDGERENTRIES.LIST, ISDEEMEDPOSITIVE=No, positive amount
+  const vendEntry = voucher.ele('LEDGERENTRIES.LIST');
+  vendEntry.ele('LEDGERNAME').txt(vendorName);
+  vendEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  vendEntry.ele('ISPARTYLEDGER').txt('Yes');
+  vendEntry.ele('AMOUNT').txt(String(total));
+  const billAlloc = vendEntry.ele('BILLALLOCATIONS.LIST');
+  billAlloc.ele('NAME').txt(billNo);
+  billAlloc.ele('BILLTYPE').txt('New Ref');
+  billAlloc.ele('AMOUNT').txt(String(total));
+
+  // GST Input ledgers (Dr): LEDGERENTRIES.LIST, ISDEEMEDPOSITIVE=Yes, negative amount
   if (cgst > 0) {
-    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    const e = voucher.ele('LEDGERENTRIES.LIST');
     e.ele('LEDGERNAME').txt('CGST Input');
     e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('ISPARTYLEDGER').txt('No');
     e.ele('AMOUNT').txt('-' + cgst);
   }
   if (sgst > 0) {
-    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    const e = voucher.ele('LEDGERENTRIES.LIST');
     e.ele('LEDGERNAME').txt('SGST Input');
     e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('ISPARTYLEDGER').txt('No');
     e.ele('AMOUNT').txt('-' + sgst);
   }
   if (igst > 0) {
-    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    const e = voucher.ele('LEDGERENTRIES.LIST');
     e.ele('LEDGERNAME').txt('IGST Input');
     e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('ISPARTYLEDGER').txt('No');
     e.ele('AMOUNT').txt('-' + igst);
   }
-
-  // Vendor (Cr): ISDEEMEDPOSITIVE=No, AMOUNT=+total, with bill allocation
-  const vendEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
-  vendEntry.ele('LEDGERNAME').txt(vendorName);
-  vendEntry.ele('ISDEEMEDPOSITIVE').txt('No');
-  vendEntry.ele('AMOUNT').txt(String(total));
-  const bill_alloc = vendEntry.ele('BILLALLOCATIONS.LIST');
-  bill_alloc.ele('NAME').txt(bill.bill_no || '');
-  bill_alloc.ele('BILLTYPE').txt('New Ref');
-  bill_alloc.ele('AMOUNT').txt(String(total));
 
   return doc.end({ prettyPrint: true });
 }
@@ -1132,12 +1210,146 @@ async function mainLoop() {
   }
 }
 
+// 🏗️ Build Payment voucher XML (Timber → Tally vendor payment)
+function buildPaymentVoucherXML(p) {
+  const rawDate = p.date || new Date().toISOString();
+  const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+    .split('T')[0].replace(/-/g, '');
+  const vendorName = p.vendor_name || 'Unknown Vendor';
+  const amount = p.amount || 0;
+
+  const doc = create({ version: '1.0' });
+  const envelope = doc.ele('ENVELOPE');
+  envelope.ele('HEADER').ele('TALLYREQUEST').txt('Import Data');
+  const importData = envelope.ele('BODY').ele('IMPORTDATA');
+  importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
+
+  const voucher = importData.ele('REQUESTDATA')
+    .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
+    .ele('VOUCHER', { VCHTYPE: 'Payment', ACTION: 'Create' });
+
+  voucher.ele('DATE').txt(dateStr);
+  voucher.ele('EFFECTIVEDATE').txt(dateStr);
+  voucher.ele('VOUCHERTYPENAME').txt('Payment');
+  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
+  voucher.ele('NARRATION').txt(p.notes || '');
+
+  // Cash: ISDEEMEDPOSITIVE=Yes, AMOUNT=-amount (cash goes out)
+  const cashEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  cashEntry.ele('LEDGERNAME').txt('Cash');
+  cashEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
+  cashEntry.ele('AMOUNT').txt('-' + amount);
+
+  // Vendor: ISDEEMEDPOSITIVE=No, AMOUNT=+amount (payable cleared), Agst Ref
+  const vendEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  vendEntry.ele('LEDGERNAME').txt(vendorName);
+  vendEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  vendEntry.ele('AMOUNT').txt(String(amount));
+  const billAlloc = vendEntry.ele('BILLALLOCATIONS.LIST');
+  billAlloc.ele('NAME').txt(p.bill_ref || '');
+  billAlloc.ele('BILLTYPE').txt('Agst Ref');
+  billAlloc.ele('AMOUNT').txt(String(amount));
+
+  return doc.end({ prettyPrint: true });
+}
+
+async function fetchTallyPaymentNumber(dateStr, vendorName, amount) {
+  try {
+    const xml = `<?xml version="1.0"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>Day Book</REPORTNAME>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      <SVFROMDATE>${dateStr}</SVFROMDATE>
+      <SVTODATE>${dateStr}</SVTODATE>
+    </STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+    const res = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+      .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
+    for (const [, body] of blocks) {
+      const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+      if (name.toLowerCase() !== vendorName.toLowerCase()) continue;
+      const ledgerBodies = [
+        ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
+        ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
+      ];
+      const amountMatched = ledgerBodies.some(b => {
+        const amtMatch = b.match(/<AMOUNT>(.*?)<\/AMOUNT>/);
+        const amt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
+        return amt !== null && Math.abs(amt - amount) <= 1;
+      });
+      if (!amountMatched) continue;
+      return get('VOUCHERNUMBER');
+    }
+  } catch (e) {
+    console.error('[agent] fetchTallyPaymentNumber error:', e.message);
+  }
+  return null;
+}
+
+async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentNumber) {
+  try {
+    await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY, companyId: COMPANY_ID,
+      event: 'payment-made-sync-status',
+      data: { paymentMadeId, status, error: errorMsg || '', paymentNumber }
+    });
+  } catch (err) {
+    console.error('❌ Failed to report payment-made status:', err.message);
+  }
+}
+
+async function paymentMadeLoop() {
+  try {
+    const res = await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY, companyId: COMPANY_ID, event: 'payment-made-sync-request'
+    });
+    const payments = res.data.payments || [];
+    console.log(`💸 Processing ${payments.length} vendor payment(s)`);
+    for (const p of payments) {
+      try {
+        await ensureCashLedger();
+        const xml = buildPaymentVoucherXML(p);
+        console.log(`[payment-made] Payment XML for ${p._id}:`, xml);
+        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+        console.log(`[payment-made] Tally response for ${p._id}:`, tallyRes.data);
+        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+        const lineError = extractLineError(tallyRes.data);
+        if (lineError) throw new Error(`Payment creation failed: ${lineError}`);
+        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
+          throw new Error(`Payment had exceptions: ${detail}`);
+        }
+        const rawDate = p.date || new Date().toISOString();
+        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+          .split('T')[0].replace(/-/g, '');
+        const paymentNumber = await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount);
+        console.log(`✅ Vendor payment ${p._id} synced, voucher: ${paymentNumber}`);
+        await reportPaymentMadeStatus(p._id, 'success', null, paymentNumber);
+      } catch (err) {
+        console.error(`❌ Vendor payment ${p._id} failed:`, err.message);
+        await reportPaymentMadeStatus(p._id, 'error', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Payment-made loop error:', err.response?.data?.message || err.message);
+  }
+}
+
 // 🕒 Run every minute
 setInterval(mainLoop, 60 * 1000);
 setInterval(paymentLoop, 60 * 1000);
 setInterval(billLoop, 60 * 1000);
+setInterval(paymentMadeLoop, 60 * 1000);
 mainLoop();
 paymentLoop();
 billLoop();
+paymentMadeLoop();
 
 require('./tally-pull');

@@ -118,7 +118,7 @@ function buildSupplierLedgerXML(supplierName) {
  
  
  
-// ✅ Purchase Ledger XML
+// ✅ Purchase Account Ledger XML
 function buildPurchaseLedgerXML() {
   return create()
     .ele("ENVELOPE")
@@ -127,8 +127,8 @@ function buildPurchaseLedgerXML() {
     .ele("REQUESTDESC").ele("REPORTNAME").txt("All Masters").up().up()
     .ele("REQUESTDATA")
     .ele("TALLYMESSAGE")
-    .ele("LEDGER", { NAME: "Purchase", ACTION: "Create" })
-    .ele("NAME").txt("Purchase").up()
+    .ele("LEDGER", { NAME: "Purchase Account", ACTION: "Create" })
+    .ele("NAME").txt("Purchase Account").up()
     .ele("PARENT").txt("Purchase Accounts").up()
     .ele("ISDEEMEDPOSITIVE").txt("Yes").up()
     .ele("ISBILLWISEON").txt("No").up()
@@ -211,82 +211,99 @@ function buildPurchaseVoucherXML(invoice) {
   const dateStr = (invoice.invoice_date || new Date().toISOString())
     .split("T")[0]
     .replace(/-/g, "");
- 
-  const root = create()
-    .ele("ENVELOPE")
-    .ele("HEADER").ele("TALLYREQUEST").txt("Import Data").up().up()
-    .ele("BODY").ele("IMPORTDATA")
-    .ele("REQUESTDESC").ele("REPORTNAME").txt("Vouchers").up().up()
-    .ele("REQUESTDATA")
-    .ele("TALLYMESSAGE", { xmlns: "TallyUDF" })
-    .ele("VOUCHER", { VCHTYPE: "Purchase", ACTION: "Create" })
-    .ele("DATE").txt(dateStr).up()
-    .ele("VOUCHERTYPENAME").txt("Purchase").up()
-    .ele("PARTYLEDGERNAME").txt(invoice.customer?.name || "Unknown Supplier").up()
-    .ele("PERSISTEDVIEW").txt("Invoice Voucher View").up()
- 
-    // Credit supplier (negative amount)
-    .ele("LEDGERENTRIES.LIST")
-    .ele("LEDGERNAME").txt(invoice.customer?.name || "Unknown Supplier").up()
-    .ele("ISDEEMEDPOSITIVE").txt("Yes").up()
-    .ele("AMOUNT").txt(`-${invoice.total}`).up()
-    .up()
- 
-    // Debit Purchase ledger (positive amount)
-    .ele("LEDGERENTRIES.LIST")
-    .ele("LEDGERNAME").txt("Purchase").up()
-    .ele("ISDEEMEDPOSITIVE").txt("No").up()
-    .ele("AMOUNT").txt(invoice.total).up()
-    .up();
- 
-  // Inventory entries for each item
-  for (let item of invoice.items || []) {
+
+  const supplierName = invoice.customer?.name || invoice.vendor?.name || "Unknown Supplier";
+  const cgst = invoice.cgst || 0;
+  const sgst = invoice.sgst || 0;
+  const igst = invoice.igst || 0;
+  const total = invoice.total || 0;
+  const billNo = invoice.invoice_number || invoice.bill_no || "";
+
+  const doc = create({ version: "1.0" });
+  const envelope = doc.ele("ENVELOPE");
+  envelope.ele("HEADER").ele("TALLYREQUEST").txt("Import Data");
+  const importData = envelope.ele("BODY").ele("IMPORTDATA");
+  importData.ele("REQUESTDESC").ele("REPORTNAME").txt("Vouchers");
+
+  const voucher = importData.ele("REQUESTDATA")
+    .ele("TALLYMESSAGE", { "xmlns:UDF": "TallyUDF" })
+    .ele("VOUCHER", { VCHTYPE: "Purchase", ACTION: "Create", OBJVIEW: "Invoice Voucher View" });
+
+  voucher.ele("DATE").txt(dateStr);
+  voucher.ele("EFFECTIVEDATE").txt(dateStr);
+  voucher.ele("VOUCHERTYPENAME").txt("Purchase");
+  voucher.ele("PARTYNAME").txt(supplierName);
+  voucher.ele("PARTYLEDGERNAME").txt(supplierName);
+  voucher.ele("PERSISTEDVIEW").txt("Invoice Voucher View");
+  voucher.ele("VCHENTRYMODE").txt("Item Invoice");
+  voucher.ele("ISINVOICE").txt("Yes");
+  voucher.ele("NARRATION").txt(invoice.notes || "");
+
+  // Inventory entries — Purchase Account ONLY in ACCOUNTINGALLOCATIONS, not separately
+  // Signs follow Tally's own export: ISDEEMEDPOSITIVE=Yes + negative AMOUNT for purchase/debit side
+  for (const item of invoice.items || []) {
     const qty = item.quantity || 1;
     const rate = item.unit_price || item.price || 0;
     const amount = qty * rate;
- 
-    root.last()
-      .ele("INVENTORYENTRIES.LIST")
-      .ele("STOCKITEMNAME").txt(item.title || "Unknown Item").up()
-      .ele("ISDEEMEDPOSITIVE").txt("No").up()
-      .ele("RATE").txt(rate).up()
-      .ele("AMOUNT").txt(amount).up()
-      .ele("ACTUALQTY").txt(`${qty} pcs`).up()
-      .ele("BILLEDQTY").txt(`${qty} pcs`).up()
-      .ele("UNIT").txt("PIECES").up()
-      .up();
+    const itemName = item.title || item.name || "Unknown Item";
+
+    const inv = voucher.ele("ALLINVENTORYENTRIES.LIST");
+    inv.ele("STOCKITEMNAME").txt(itemName);
+    inv.ele("ISDEEMEDPOSITIVE").txt("Yes");
+    inv.ele("RATE").txt(`${rate}/PIECES`);
+    inv.ele("AMOUNT").txt("-" + amount);
+    inv.ele("ACTUALQTY").txt(`${qty} PIECES`);
+    inv.ele("BILLEDQTY").txt(`${qty} PIECES`);
+
+    const batch = inv.ele("BATCHALLOCATIONS.LIST");
+    batch.ele("GODOWNNAME").txt("Main Location");
+    batch.ele("BATCHNAME").txt("Primary Batch");
+    batch.ele("AMOUNT").txt("-" + amount);
+    batch.ele("ACTUALQTY").txt(`${qty} PIECES`);
+    batch.ele("BILLEDQTY").txt(`${qty} PIECES`);
+
+    const acct = inv.ele("ACCOUNTINGALLOCATIONS.LIST");
+    acct.ele("LEDGERNAME").txt("Purchase Account");
+    acct.ele("ISDEEMEDPOSITIVE").txt("Yes");
+    acct.ele("ISPARTYLEDGER").txt("No");
+    acct.ele("AMOUNT").txt("-" + amount);
   }
- 
-  return root.end({ prettyPrint: true });
-}
- 
- 
-/* -------------------- Voucher XML -------------------- */
-function buildPurchaseLedgerXML() {
-  return create({ version: "1.0" })
-    .ele("ENVELOPE")
-    .ele("HEADER")
-    .ele("TALLYREQUEST").txt("Import Data").up()
-    .up()
-    .ele("BODY")
-    .ele("IMPORTDATA")
-    .ele("REQUESTDESC")
-    .ele("REPORTNAME").txt("All Masters").up()
-    .up()
-    .ele("REQUESTDATA")
-    .ele("TALLYMESSAGE")
-    .ele("LEDGER", { NAME: "Purchase", RESERVEDNAME: "" })
-    .ele("NAME").txt("Purchase").up()
-    .ele("PARENT").txt("Purchase Accounts").up()   // group name
-    .ele("ISDEEMEDPOSITIVE").txt("Yes").up()
-    .ele("ISBILLWISEON").txt("No").up()
-    .ele("ISREVENUE").txt("No").up()
-    .up()
-    .up()
-    .up()
-    .up()
-    .up()
-    .end({ prettyPrint: true });
+
+  // Vendor (Cr): LEDGERENTRIES.LIST, positive amount, ISDEEMEDPOSITIVE=No
+  const vendEntry = voucher.ele("LEDGERENTRIES.LIST");
+  vendEntry.ele("LEDGERNAME").txt(supplierName);
+  vendEntry.ele("ISDEEMEDPOSITIVE").txt("No");
+  vendEntry.ele("ISPARTYLEDGER").txt("Yes");
+  vendEntry.ele("AMOUNT").txt(String(total));
+  const billAlloc = vendEntry.ele("BILLALLOCATIONS.LIST");
+  billAlloc.ele("NAME").txt(billNo);
+  billAlloc.ele("BILLTYPE").txt("New Ref");
+  billAlloc.ele("AMOUNT").txt(String(total));
+
+  // GST Input ledgers (Dr): LEDGERENTRIES.LIST, ISDEEMEDPOSITIVE=Yes, negative amount
+  if (cgst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("CGST Input");
+    e.ele("ISDEEMEDPOSITIVE").txt("Yes");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("AMOUNT").txt("-" + cgst);
+  }
+  if (sgst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("SGST Input");
+    e.ele("ISDEEMEDPOSITIVE").txt("Yes");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("AMOUNT").txt("-" + sgst);
+  }
+  if (igst > 0) {
+    const e = voucher.ele("LEDGERENTRIES.LIST");
+    e.ele("LEDGERNAME").txt("IGST Input");
+    e.ele("ISDEEMEDPOSITIVE").txt("Yes");
+    e.ele("ISPARTYLEDGER").txt("No");
+    e.ele("AMOUNT").txt("-" + igst);
+  }
+
+  return doc.end({ prettyPrint: true });
 }
  
  
@@ -319,7 +336,7 @@ async function mainLoop() {
  
     for (let invoice of invoices) {
       try {
-        console.log(`🔄 Processing purchase invoice ${invoice._id}`);
+        console.log(`🔄 Processing purchase invoice ${invoice}`);
         await ensureMasterData(invoice);
  
         const xml = buildPurchaseVoucherXML(invoice);
