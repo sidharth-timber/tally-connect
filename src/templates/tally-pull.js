@@ -132,6 +132,46 @@ function parseReceipts(xml) {
     return results;
 }
 
+function parsePurchases(xml) {
+    const purchaseBlocks = [...xml.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+        .filter(([, body]) => /<VOUCHERTYPENAME>\s*Purchase\s*<\/VOUCHERTYPENAME>/i.test(body));
+
+    return purchaseBlocks.map(([, body]) => {
+        const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+
+        // Purchase vouchers may use LEDGERENTRIES.LIST (invoice type) or ALLLEDGERENTRIES.LIST (accounting type)
+        const allLedgers = [
+            ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
+            ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
+        ].map(b => {
+            const g = t => { const m = b.match(new RegExp(`<${t}>(.*?)<\\/${t}>`)); return m ? m[1].trim() : ''; };
+            return { ledger: g('LEDGERNAME'), amount: g('AMOUNT') };
+        });
+
+        const cgst    = sumLedger(allLedgers, 'CGST');
+        const sgst    = sumLedger(allLedgers, 'SGST');
+        const igst    = sumLedger(allLedgers, 'IGST');
+        // Taxable = purchase/expense ledger amount (positive entry in Purchase)
+        const taxable = allLedgers
+            .filter(e => /purchase/i.test(e.ledger) || /expense/i.test(e.ledger))
+            .reduce((s, e) => s + Math.abs(parseTallyAmt(e.amount)), 0);
+        const total = taxable + cgst + sgst + igst;
+
+        return {
+            voucher_number: get('VOUCHERNUMBER'),
+            date:           get('DATE'),
+            party_name:     get('PARTYNAME') || get('PARTYLEDGERNAME'),
+            gstin:          get('PARTYGSTIN'),
+            taxable,
+            cgst,
+            sgst,
+            igst,
+            total: total || Math.abs(parseTallyAmt(get('AMOUNT'))),
+            narration: get('NARRATION')
+        };
+    }).filter(v => v.voucher_number && v.party_name);
+}
+
 async function pullLoop() {
     try {
         const to = new Date();
@@ -159,6 +199,19 @@ async function pullLoop() {
                 console.log(`[pull] ${v.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
             } catch (e) {
                 console.error(`[pull] ${v.voucher_number} failed:`, e.message);
+            }
+        }
+
+        const purchases = parsePurchases(tallyRes.data);
+        console.log(`[pull] ${purchases.length} Purchase voucher(s) found in Tally`);
+        for (const p of purchases) {
+            try {
+                const r = await axios.post(`${SERVER_URL}/webhook`, {
+                    apiKey: API_KEY, companyId: COMPANY_ID, event: 'tally-purchase', data: p
+                });
+                console.log(`[pull] purchase ${p.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
+            } catch (e) {
+                console.error(`[pull] purchase ${p.voucher_number} failed:`, e.message);
             }
         }
 

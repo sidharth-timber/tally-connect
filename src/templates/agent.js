@@ -691,6 +691,245 @@ function buildReceiptXML(p) {
   return doc.end({ prettyPrint: true });
 }
 
+function buildVendorLedgerXML(vendorName) {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: vendorName, RESERVEDNAME: '' })
+            .ele('NAME').txt(vendorName).up()
+            .ele('PARENT').txt('Sundry Creditors').up()
+            .ele('ISBILLWISEON').txt('Yes').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+function buildPurchaseAccountXML() {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: 'Purchase Account', RESERVEDNAME: '' })
+            .ele('NAME').txt('Purchase Account').up()
+            .ele('PARENT').txt('Purchase Accounts').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+function buildGSTInputLedgerXML(name, head) {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: name, RESERVEDNAME: '' })
+            .ele('NAME').txt(name).up()
+            .ele('PARENT').txt('Duties & Taxes').up()
+            .ele('TAXTYPE').txt('GST').up()
+            .ele('GSTDUTYHEAD').txt(head).up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+async function ensurePurchaseMasterData(bill) {
+  const vendorName = bill.vendor_name || 'Unknown Vendor';
+  // Purchase Account ledger
+  try {
+    const res = await axios.post(TALLY_URL, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Purchase Account ledger:', err);
+  } catch (e) { console.log('⚠️ Purchase Account error:', e.message); }
+
+  // GST Input ledgers
+  const inputLedgers = [];
+  if (bill.cgst > 0) inputLedgers.push({ name: 'CGST Input', head: 'Central Tax' });
+  if (bill.sgst > 0) inputLedgers.push({ name: 'SGST Input', head: 'State Tax' });
+  if (bill.igst > 0) inputLedgers.push({ name: 'IGST Input', head: 'Integrated Tax' });
+  for (const l of inputLedgers) {
+    try {
+      const res = await axios.post(TALLY_URL, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(res.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ ${l.name} ledger:`, err);
+    } catch (e) { console.log(`⚠️ ${l.name} error:`, e.message); }
+  }
+
+  // Vendor ledger (Sundry Creditors)
+  try {
+    const res = await axios.post(TALLY_URL, buildVendorLedgerXML(vendorName), { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ Vendor ledger "${vendorName}":`, err);
+    else console.log(`✅ Vendor ledger "${vendorName}" ensured`);
+  } catch (e) { console.log('⚠️ Vendor ledger error:', e.message); }
+}
+
+function buildPurchaseXML(bill) {
+  const rawDate = bill.bill_date || new Date().toISOString();
+  const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+    .split('T')[0].replace(/-/g, '');
+  const vendorName = bill.vendor_name || 'Unknown Vendor';
+  const taxable = bill.taxable || 0;
+  const cgst = bill.cgst || 0;
+  const sgst = bill.sgst || 0;
+  const igst = bill.igst || 0;
+  const total = bill.total_amount || (taxable + cgst + sgst + igst);
+
+  const doc = create({ version: '1.0' });
+  const envelope = doc.ele('ENVELOPE');
+  envelope.ele('HEADER').ele('TALLYREQUEST').txt('Import Data');
+  const importData = envelope.ele('BODY').ele('IMPORTDATA');
+  importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
+
+  const voucher = importData.ele('REQUESTDATA')
+    .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
+    .ele('VOUCHER', { VCHTYPE: 'Purchase', ACTION: 'Create' });
+
+  voucher.ele('DATE').txt(dateStr);
+  voucher.ele('EFFECTIVEDATE').txt(dateStr);
+  voucher.ele('VOUCHERTYPENAME').txt('Purchase');
+  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
+  voucher.ele('NARRATION').txt(bill.description || bill.bill_no || '');
+
+  // Purchase Account (Dr): ISDEEMEDPOSITIVE=Yes, AMOUNT=-taxable
+  const purchEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  purchEntry.ele('LEDGERNAME').txt('Purchase Account');
+  purchEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
+  purchEntry.ele('AMOUNT').txt('-' + taxable);
+
+  // GST Input ledgers (Dr)
+  if (cgst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('CGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('AMOUNT').txt('-' + cgst);
+  }
+  if (sgst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('SGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('AMOUNT').txt('-' + sgst);
+  }
+  if (igst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('IGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('AMOUNT').txt('-' + igst);
+  }
+
+  // Vendor (Cr): ISDEEMEDPOSITIVE=No, AMOUNT=+total, with bill allocation
+  const vendEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  vendEntry.ele('LEDGERNAME').txt(vendorName);
+  vendEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  vendEntry.ele('AMOUNT').txt(String(total));
+  const bill_alloc = vendEntry.ele('BILLALLOCATIONS.LIST');
+  bill_alloc.ele('NAME').txt(bill.bill_no || '');
+  bill_alloc.ele('BILLTYPE').txt('New Ref');
+  bill_alloc.ele('AMOUNT').txt(String(total));
+
+  return doc.end({ prettyPrint: true });
+}
+
+async function fetchTallyPurchaseVoucherNumber(dateStr, vendorName, total) {
+  try {
+    const xml = `<?xml version="1.0"?>
+<ENVELOPE>
+  <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
+  <BODY><EXPORTDATA><REQUESTDESC>
+    <REPORTNAME>Day Book</REPORTNAME>
+    <STATICVARIABLES>
+      <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
+      <SVFROMDATE>${dateStr}</SVFROMDATE>
+      <SVTODATE>${dateStr}</SVTODATE>
+    </STATICVARIABLES>
+  </REQUESTDESC></EXPORTDATA></BODY>
+</ENVELOPE>`;
+    const res = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+      .filter(([, body]) => /<VOUCHERTYPENAME>\s*Purchase\s*<\/VOUCHERTYPENAME>/i.test(body));
+    for (const [, body] of blocks) {
+      const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+      if (name.toLowerCase() !== vendorName.toLowerCase()) continue;
+      // Match by total amount — check both ALLLEDGERENTRIES and LEDGERENTRIES
+      // (Tally may normalize tag names on export differently from import)
+      const ledgerBodies = [
+        ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
+        ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
+      ];
+      const amountMatched = ledgerBodies.some(b => {
+        const amtMatch = b.match(/<AMOUNT>(.*?)<\/AMOUNT>/);
+        const amt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
+        return amt !== null && Math.abs(amt - total) <= 1;
+      });
+      if (!amountMatched) continue;
+      return get('VOUCHERNUMBER');
+    }
+  } catch (e) {
+    console.error('[agent] fetchTallyPurchaseVoucherNumber error:', e.message);
+  }
+  return null;
+}
+
+async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber) {
+  try {
+    await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY, companyId: COMPANY_ID,
+      event: 'bill-sync-status',
+      data: { billId, status, error: errorMsg || '', tallyVoucherNumber }
+    });
+  } catch (err) {
+    console.error('❌ Failed to report bill status:', err.message);
+  }
+}
+
+async function billLoop() {
+  try {
+    const res = await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY, companyId: COMPANY_ID, event: 'bill-sync-request'
+    });
+    const bills = res.data.bills || [];
+    console.log(`🧾 Processing ${bills.length} bill(s)`);
+    for (const bill of bills) {
+      try {
+        await ensurePurchaseMasterData(bill);
+        const xml = buildPurchaseXML(bill);
+        console.log(`[bill] Purchase XML for ${bill._id}:`, xml);
+        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+        console.log(`[bill] Tally response for ${bill._id}:`, tallyRes.data);
+        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+        const lineError = extractLineError(tallyRes.data);
+        if (lineError) throw new Error(`Purchase creation failed: ${lineError}`);
+        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
+          throw new Error(`Purchase had exceptions: ${detail}`);
+        }
+        const rawDate = bill.bill_date || new Date().toISOString();
+        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+          .split('T')[0].replace(/-/g, '');
+        const tallyVoucherNumber = await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount);
+        console.log(`✅ Bill ${bill._id} synced, voucher: ${tallyVoucherNumber}`);
+        await reportBillStatus(bill._id, 'success', null, tallyVoucherNumber);
+      } catch (err) {
+        console.error(`❌ Bill ${bill._id} failed:`, err.message);
+        await reportBillStatus(bill._id, 'error', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Bill loop error:', err.response?.data?.message || err.message);
+  }
+}
+
 async function ensureCashLedger() {
   const xml = create({ version: '1.0' })
     .ele('ENVELOPE')
@@ -896,7 +1135,9 @@ async function mainLoop() {
 // 🕒 Run every minute
 setInterval(mainLoop, 60 * 1000);
 setInterval(paymentLoop, 60 * 1000);
+setInterval(billLoop, 60 * 1000);
 mainLoop();
 paymentLoop();
+billLoop();
 
 require('./tally-pull');
