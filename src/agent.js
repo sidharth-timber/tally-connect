@@ -362,5 +362,261 @@ async function mainLoop() {
   }
 }
  
+// ─── Expense Sync ────────────────────────────────────────────────────────────
+
+const EXPENSE_LEDGER_MAP = {
+  rent: 'Rent', utilities: 'Utilities', salaries: 'Salaries',
+  office_supplies: 'Office Supplies', travel: 'Travel Expenses',
+  marketing: 'Marketing Expenses', software: 'Software Expenses',
+  hardware: 'Hardware Expenses', maintenance: 'Maintenance Expenses',
+  insurance: 'Insurance', professional_fees: 'Professional Fees',
+  taxes: 'Taxes & Duties', miscellaneous: 'Miscellaneous Expenses'
+};
+
+function categoryToLedger(category) {
+  return EXPENSE_LEDGER_MAP[category] || 'Miscellaneous Expenses';
+}
+
+function buildExpenseLedgerXML(ledgerName) {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: ledgerName, RESERVEDNAME: '' })
+            .ele('NAME').txt(ledgerName).up()
+            .ele('PARENT').txt('Indirect Expenses').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+function buildBankLedgerXML() {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: 'Bank', RESERVEDNAME: '' })
+            .ele('NAME').txt('Bank').up()
+            .ele('PARENT').txt('Bank Accounts').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+function buildTDSPayableLedgerXML() {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: 'TDS Payable', RESERVEDNAME: '' })
+            .ele('NAME').txt('TDS Payable').up()
+            .ele('PARENT').txt('Duties & Taxes').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+function buildGSTInputLedgerXML(name, head) {
+  return create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: name, RESERVEDNAME: '' })
+            .ele('NAME').txt(name).up()
+            .ele('PARENT').txt('Duties & Taxes').up()
+            .ele('TAXTYPE').txt('GST').up()
+            .ele('GSTDUTYHEAD').txt(head).up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+}
+
+async function ensureCashLedger() {
+  const xml = create({ version: '1.0' })
+    .ele('ENVELOPE')
+      .ele('HEADER').ele('TALLYREQUEST').txt('Import Data').up().up()
+      .ele('BODY').ele('IMPORTDATA')
+        .ele('REQUESTDESC').ele('REPORTNAME').txt('All Masters').up().up()
+        .ele('REQUESTDATA').ele('TALLYMESSAGE')
+          .ele('LEDGER', { NAME: 'Cash', RESERVEDNAME: '' })
+            .ele('NAME').txt('Cash').up()
+            .ele('PARENT').txt('Cash-in-Hand').up()
+          .up()
+        .up().up()
+      .up()
+    .end({ prettyPrint: true });
+  try {
+    const res = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Cash ledger:', err);
+  } catch (e) { console.log('⚠️ Cash ledger error:', e.message); }
+}
+
+async function ensureExpenseMasterData(expense) {
+  const ledgerName = categoryToLedger(expense.category);
+  const bankLedger = expense.mode === 'cash' ? 'Cash' : 'Bank';
+
+  try {
+    const res = await axios.post(TALLY_URL, buildExpenseLedgerXML(ledgerName), { headers: { 'Content-Type': 'application/xml' } });
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ Expense ledger "${ledgerName}":`, err);
+    else console.log(`✅ Expense ledger "${ledgerName}" ensured`);
+  } catch (e) { console.log('⚠️ Expense ledger error:', e.message); }
+
+  if (bankLedger === 'Cash') {
+    await ensureCashLedger();
+  } else {
+    try {
+      const res = await axios.post(TALLY_URL, buildBankLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(res.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Bank ledger:', err);
+    } catch (e) { console.log('⚠️ Bank ledger error:', e.message); }
+  }
+
+  const inputLedgers = [];
+  if (expense.cgst > 0) inputLedgers.push({ name: 'CGST Input', head: 'Central Tax' });
+  if (expense.sgst > 0) inputLedgers.push({ name: 'SGST Input', head: 'State Tax' });
+  if (expense.igst > 0) inputLedgers.push({ name: 'IGST Input', head: 'Integrated Tax' });
+  for (const l of inputLedgers) {
+    try {
+      const res = await axios.post(TALLY_URL, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(res.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ ${l.name}:`, err);
+    } catch (e) { console.log(`⚠️ ${l.name} error:`, e.message); }
+  }
+
+  if (expense.has_tds && expense.tds_amount > 0) {
+    try {
+      const res = await axios.post(TALLY_URL, buildTDSPayableLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(res.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ TDS Payable ledger:', err);
+    } catch (e) { console.log('⚠️ TDS Payable ledger error:', e.message); }
+  }
+}
+
+function buildExpenseXML(expense) {
+  const rawDate = expense.date || new Date().toISOString();
+  const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+    .split('T')[0].replace(/-/g, '');
+  const ledgerName = categoryToLedger(expense.category);
+  const bankLedger = expense.mode === 'cash' ? 'Cash' : 'Bank';
+  const taxable = expense.taxable || 0;
+  const total = expense.total || taxable;
+  const cgst = expense.cgst || 0;
+  const sgst = expense.sgst || 0;
+  const igst = expense.igst || 0;
+  const hasTds = expense.has_tds && expense.tds_amount > 0;
+  const tdsAmount = hasTds ? expense.tds_amount : 0;
+  const cashAmount = total - tdsAmount;
+
+  const doc = create({ version: '1.0' });
+  const envelope = doc.ele('ENVELOPE');
+  envelope.ele('HEADER').ele('TALLYREQUEST').txt('Import Data');
+  const importData = envelope.ele('BODY').ele('IMPORTDATA');
+  importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
+
+  const voucher = importData.ele('REQUESTDATA')
+    .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
+    .ele('VOUCHER', { VCHTYPE: 'Payment', ACTION: 'Create' });
+
+  voucher.ele('DATE').txt(dateStr);
+  voucher.ele('EFFECTIVEDATE').txt(dateStr);
+  voucher.ele('VOUCHERTYPENAME').txt('Payment');
+  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
+  voucher.ele('NARRATION').txt(expense.narration || expense.notes || '');
+
+  const bankEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  bankEntry.ele('LEDGERNAME').txt(bankLedger);
+  bankEntry.ele('ISDEEMEDPOSITIVE').txt('Yes');
+  bankEntry.ele('AMOUNT').txt('-' + cashAmount);
+
+  const expEntry = voucher.ele('ALLLEDGERENTRIES.LIST');
+  expEntry.ele('LEDGERNAME').txt(ledgerName);
+  expEntry.ele('ISDEEMEDPOSITIVE').txt('No');
+  expEntry.ele('AMOUNT').txt(String(taxable));
+
+  if (cgst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('CGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('No');
+    e.ele('AMOUNT').txt(String(cgst));
+  }
+  if (sgst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('SGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('No');
+    e.ele('AMOUNT').txt(String(sgst));
+  }
+  if (igst > 0) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('IGST Input');
+    e.ele('ISDEEMEDPOSITIVE').txt('No');
+    e.ele('AMOUNT').txt(String(igst));
+  }
+
+  if (hasTds) {
+    const e = voucher.ele('ALLLEDGERENTRIES.LIST');
+    e.ele('LEDGERNAME').txt('TDS Payable');
+    e.ele('ISDEEMEDPOSITIVE').txt('Yes');
+    e.ele('AMOUNT').txt('-' + tdsAmount);
+  }
+
+  return doc.end({ prettyPrint: true });
+}
+
+async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumber) {
+  try {
+    await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY,
+      event: 'expense-sync-status',
+      data: { expenseId, status, error: errorMsg || '', tallyVoucherNumber }
+    });
+  } catch (err) {
+    console.error('❌ Failed to report expense status:', err.message);
+  }
+}
+
+async function expenseLoop() {
+  try {
+    const res = await axios.post(`${SERVER_URL}/webhook`, {
+      apiKey: API_KEY,
+      event: 'expense-sync-request'
+    });
+    const expenses = res.data.expenses || [];
+    console.log(`🧾 Processing ${expenses.length} expense(s)`);
+    for (const expense of expenses) {
+      try {
+        await ensureExpenseMasterData(expense);
+        const xml = buildExpenseXML(expense);
+        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+        const lineError = extractLineError(tallyRes.data);
+        if (lineError) throw new Error(`Expense creation failed: ${lineError}`);
+        console.log(`✅ Expense ${expense._id} synced`);
+        await reportExpenseStatus(expense._id, 'success');
+      } catch (err) {
+        console.error(`❌ Expense ${expense._id} failed:`, err.message);
+        await reportExpenseStatus(expense._id, 'error', err.message);
+      }
+    }
+  } catch (err) {
+    console.error('❌ Expense loop error:', err.message);
+  }
+}
+
 setInterval(mainLoop, 60 * 1000);
+setInterval(expenseLoop, 60 * 1000);
 mainLoop();
+expenseLoop();
