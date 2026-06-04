@@ -350,11 +350,11 @@ async function mainLoop() {
         const invoiceError = extractLineError(tallyRes.data);
         if (invoiceError) throw new Error(invoiceError);
  
-        console.log(`✅ Synced purchase invoice ${invoice._id}`);
-        await reportStatus(invoice._id, "success");
+        console.log(`✅ Synced purchase invoice ${invoice.id}`);
+        await reportStatus(invoice.id, "success");
       } catch (err) {
-        console.error(`❌ Failed to sync purchase invoice ${invoice._id}: ${err.message}`);
-        await reportStatus(invoice._id, "error", err.message);
+        console.error(`❌ Failed to sync purchase invoice ${invoice.id}: ${err.message}`);
+        await reportStatus(invoice.id, "error", err.message);
       }
     }
   } catch (err) {
@@ -604,11 +604,11 @@ async function expenseLoop() {
         if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
         const lineError = extractLineError(tallyRes.data);
         if (lineError) throw new Error(`Expense creation failed: ${lineError}`);
-        console.log(`✅ Expense ${expense._id} synced`);
-        await reportExpenseStatus(expense._id, 'success');
+        console.log(`✅ Expense ${expense.id} synced`);
+        await reportExpenseStatus(expense.id, 'success');
       } catch (err) {
-        console.error(`❌ Expense ${expense._id} failed:`, err.message);
-        await reportExpenseStatus(expense._id, 'error', err.message);
+        console.error(`❌ Expense ${expense.id} failed:`, err.message);
+        await reportExpenseStatus(expense.id, 'error', err.message);
       }
     }
   } catch (err) {

@@ -337,7 +337,7 @@ async function reportStatus(invoiceId, status, errorMsg, tallyVoucherNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
-      companyId: COMPANY_ID,
+      company_id: COMPANY_ID,
       event: "sync-status",
       data: { invoiceId, status, error: errorMsg || "", tallyVoucherNumber }
     });
@@ -961,7 +961,7 @@ async function fetchTallyPurchaseVoucherNumber(dateStr, vendorName, total) {
 async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID,
+      apiKey: API_KEY, company_id: COMPANY_ID,
       event: 'bill-sync-status',
       data: { billId, status, error: errorMsg || '', tallyVoucherNumber }
     });
@@ -973,7 +973,7 @@ async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber) {
 async function billLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID, event: 'bill-sync-request'
+      apiKey: API_KEY, company_id: COMPANY_ID, event: 'bill-sync-request'
     });
     const bills = res.data.bills || [];
     console.log(`🧾 Processing ${bills.length} bill(s)`);
@@ -981,9 +981,9 @@ async function billLoop() {
       try {
         await ensurePurchaseMasterData(bill);
         const xml = buildPurchaseXML(bill);
-        console.log(`[bill] Purchase XML for ${bill._id}:`, xml);
+        console.log(`[bill] Purchase XML for ${bill.id}:`, xml);
         const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[bill] Tally response for ${bill._id}:`, tallyRes.data);
+        console.log(`[bill] Tally response for ${bill.id}:`, tallyRes.data);
         if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
         const lineError = extractLineError(tallyRes.data);
         if (lineError) throw new Error(`Purchase creation failed: ${lineError}`);
@@ -996,15 +996,15 @@ async function billLoop() {
         const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
           .split('T')[0].replace(/-/g, '');
         const tallyVoucherNumber = await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount);
-        console.log(`✅ Bill ${bill._id} synced, voucher: ${tallyVoucherNumber}`);
-        await reportBillStatus(bill._id, 'success', null, tallyVoucherNumber);
+        console.log(`✅ Bill ${bill.id} synced, voucher: ${tallyVoucherNumber}`);
+        await reportBillStatus(bill.id, 'success', null, tallyVoucherNumber);
       } catch (err) {
-        console.error(`❌ Bill ${bill._id} failed:`, err.message);
-        await reportBillStatus(bill._id, 'error', err.message);
+        console.error(`❌ Bill ${bill.id} failed:`, err.message);
+        await reportBillStatus(bill.id, 'error', err.message);
       }
     }
   } catch (err) {
-    console.error('❌ Bill loop error:', err.response?.data?.message || err.message);
+    console.error('❌ Bill loop error:', err.response?.data?.message || err.response?.data?.error || err.message);
   }
 }
 
@@ -1037,7 +1037,7 @@ async function reportPaymentStatus(paymentId, status, errorMsg, receiptNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
-      companyId: COMPANY_ID,
+      company_id: COMPANY_ID,
       event: 'payment-sync-status',
       data: { paymentId, status, error: errorMsg || '', receiptNumber }
     });
@@ -1095,7 +1095,7 @@ async function paymentLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
-      companyId: COMPANY_ID,
+      company_id: COMPANY_ID,
       event: 'payment-sync-request'
     });
 
@@ -1106,12 +1106,12 @@ async function paymentLoop() {
       try {
         await ensureCashLedger();
         const xml = buildReceiptXML(p);
-        console.log(`[payment] Receipt XML for ${p._id}:`, xml);
+        console.log(`[payment] Receipt XML for ${p.id}:`, xml);
         const tallyRes = await axios.post(TALLY_URL, xml, {
           headers: { 'Content-Type': 'application/xml' }
         });
 
-        console.log(`[payment] Tally response for ${p._id}:`, tallyRes.data);
+        console.log(`[payment] Tally response for ${p.id}:`, tallyRes.data);
 
         if (tallyRes.data.includes('Unknown Request'))
           throw new Error('Tally rejected receipt: Unknown Request');
@@ -1128,11 +1128,11 @@ async function paymentLoop() {
         const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
           .split('T')[0].replace(/-/g, '');
         const receiptNumber = await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount);
-        console.log(`✅ Payment ${p._id} synced, receipt: ${receiptNumber}`);
-        await reportPaymentStatus(p._id, 'success', null, receiptNumber);
+        console.log(`✅ Payment ${p.id} synced, receipt: ${receiptNumber}`);
+        await reportPaymentStatus(p.id, 'success', null, receiptNumber);
       } catch (err) {
-        console.error(`❌ Payment ${p._id} failed:`, err.message);
-        await reportPaymentStatus(p._id, 'error', err.message);
+        console.error(`❌ Payment ${p.id} failed:`, err.message);
+        await reportPaymentStatus(p.id, 'error', err.message);
       }
     }
   } catch (err) {
@@ -1145,7 +1145,7 @@ async function mainLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
       apiKey: API_KEY,
-      companyId: COMPANY_ID,
+      company_id: COMPANY_ID,
       event: "sync-request",
     });
 
@@ -1154,7 +1154,7 @@ async function mainLoop() {
 
     for (let invoice of invoices) {
       try {
-        console.log(`🔄 Processing invoice ${invoice._id}`);
+        console.log(`🔄 Processing invoice ${invoice.id}`);
         await ensureMasterData(invoice);
 
         const xml = buildInvoiceXML(invoice);
@@ -1192,17 +1192,17 @@ async function mainLoop() {
           throw new Error(`Invoice creation had exceptions: ${detail}`);
         }
 
-        console.log(`✅ Synced invoice ${invoice._id}`);
+        console.log(`✅ Synced invoice ${invoice.id}`);
         const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
         const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
           .split("T")[0].replace(/-/g, "");
         const partyName = invoice.customer?.name || invoice.customerName || "";
         const tallyVoucherNumber = await fetchTallyVoucherNumber(dateStr, partyName, invoice.total);
-        console.log(`[agent] Tally voucher number for ${invoice._id}: ${tallyVoucherNumber}`);
-        await reportStatus(invoice._id, "success", null, tallyVoucherNumber);
+        console.log(`[agent] Tally voucher number for ${invoice.id}: ${tallyVoucherNumber}`);
+        await reportStatus(invoice.id, "success", null, tallyVoucherNumber);
       } catch (err) {
-        console.error(`❌ Failed to sync invoice ${invoice._id}: ${err.message}`);
-        await reportStatus(invoice._id, "error", err.message);
+        console.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);
+        await reportStatus(invoice.id, "error", err.message);
       }
     }
   } catch (err) {
@@ -1295,7 +1295,7 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount) {
 async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID,
+      apiKey: API_KEY, company_id: COMPANY_ID,
       event: 'payment-made-sync-status',
       data: { paymentMadeId, status, error: errorMsg || '', paymentNumber }
     });
@@ -1307,7 +1307,7 @@ async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentN
 async function paymentMadeLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID, event: 'payment-made-sync-request'
+      apiKey: API_KEY, company_id: COMPANY_ID, event: 'payment-made-sync-request'
     });
     const payments = res.data.payments || [];
     console.log(`💸 Processing ${payments.length} vendor payment(s)`);
@@ -1315,9 +1315,9 @@ async function paymentMadeLoop() {
       try {
         await ensureCashLedger();
         const xml = buildPaymentVoucherXML(p);
-        console.log(`[payment-made] Payment XML for ${p._id}:`, xml);
+        console.log(`[payment-made] Payment XML for ${p.id}:`, xml);
         const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[payment-made] Tally response for ${p._id}:`, tallyRes.data);
+        console.log(`[payment-made] Tally response for ${p.id}:`, tallyRes.data);
         if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
         const lineError = extractLineError(tallyRes.data);
         if (lineError) throw new Error(`Payment creation failed: ${lineError}`);
@@ -1330,11 +1330,11 @@ async function paymentMadeLoop() {
         const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
           .split('T')[0].replace(/-/g, '');
         const paymentNumber = await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount);
-        console.log(`✅ Vendor payment ${p._id} synced, voucher: ${paymentNumber}`);
-        await reportPaymentMadeStatus(p._id, 'success', null, paymentNumber);
+        console.log(`✅ Vendor payment ${p.id} synced, voucher: ${paymentNumber}`);
+        await reportPaymentMadeStatus(p.id, 'success', null, paymentNumber);
       } catch (err) {
-        console.error(`❌ Vendor payment ${p._id} failed:`, err.message);
-        await reportPaymentMadeStatus(p._id, 'error', err.message);
+        console.error(`❌ Vendor payment ${p.id} failed:`, err.message);
+        await reportPaymentMadeStatus(p.id, 'error', err.message);
       }
     }
   } catch (err) {
@@ -1573,7 +1573,7 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amount) {
 async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumber) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID,
+      apiKey: API_KEY, company_id: COMPANY_ID,
       event: 'expense-sync-status',
       data: { expenseId, status, error: errorMsg || '', tallyVoucherNumber }
     });
@@ -1585,7 +1585,7 @@ async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumb
 async function expenseLoop() {
   try {
     const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, companyId: COMPANY_ID, event: 'expense-sync-request'
+      apiKey: API_KEY, company_id: COMPANY_ID, event: 'expense-sync-request'
     });
     const expenses = res.data.expenses || [];
     console.log(`🧾 Processing ${expenses.length} expense(s)`);
@@ -1593,9 +1593,9 @@ async function expenseLoop() {
       try {
         await ensureExpenseMasterData(expense);
         const xml = buildExpenseXML(expense);
-        console.log(`[expense] Payment XML for ${expense._id}:`, xml);
+        console.log(`[expense] Payment XML for ${expense.id}:`, xml);
         const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[expense] Tally response for ${expense._id}:`, tallyRes.data);
+        console.log(`[expense] Tally response for ${expense.id}:`, tallyRes.data);
         if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
         const lineError = extractLineError(tallyRes.data);
         if (lineError) throw new Error(`Expense creation failed: ${lineError}`);
@@ -1608,11 +1608,11 @@ async function expenseLoop() {
         const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
           .split('T')[0].replace(/-/g, '');
         const tallyVoucherNumber = await fetchTallyExpenseVoucherNumber(dateStr, expense.total);
-        console.log(`✅ Expense ${expense._id} synced, voucher: ${tallyVoucherNumber}`);
-        await reportExpenseStatus(expense._id, 'success', null, tallyVoucherNumber);
+        console.log(`✅ Expense ${expense.id} synced, voucher: ${tallyVoucherNumber}`);
+        await reportExpenseStatus(expense.id, 'success', null, tallyVoucherNumber);
       } catch (err) {
-        console.error(`❌ Expense ${expense._id} failed:`, err.message);
-        await reportExpenseStatus(expense._id, 'error', err.message);
+        console.error(`❌ Expense ${expense.id} failed:`, err.message);
+        await reportExpenseStatus(expense.id, 'error', err.message);
       }
     }
   } catch (err) {

@@ -246,7 +246,7 @@ async function pullLoop() {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
                     apiKey: API_KEY,
-                    companyId: COMPANY_ID,
+                    company_id: COMPANY_ID,
                     event: 'tally-import',
                     data: v
                 });
@@ -261,7 +261,7 @@ async function pullLoop() {
         for (const p of purchases) {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY, companyId: COMPANY_ID, event: 'tally-purchase', data: p
+                    apiKey: API_KEY, company_id: COMPANY_ID, event: 'tally-purchase', data: p
                 });
                 console.log(`[pull] purchase ${p.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
             } catch (e) {
@@ -274,7 +274,7 @@ async function pullLoop() {
         for (const p of vendor_payments) {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY, companyId: COMPANY_ID, event: 'tally-payment', data: p
+                    apiKey: API_KEY, company_id: COMPANY_ID, event: 'tally-payment', data: p
                 });
                 console.log(`[pull] payment ${p.payment_number} → bill ${p.bill_voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
             } catch (e) {
@@ -289,7 +289,7 @@ async function pullLoop() {
             try {
                 const resp = await axios.post(`${SERVER_URL}/webhook`, {
                     apiKey: API_KEY,
-                    companyId: COMPANY_ID,
+                    company_id: COMPANY_ID,
                     event: 'tally-receipt',
                     data: r
                 });
