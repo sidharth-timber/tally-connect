@@ -1,15 +1,83 @@
-require("dotenv").config();
+require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const fs = require("fs");
 
 const axios = require("axios");
 const { create } = require("xmlbuilder2");
 
 const SERVER_URL = process.env.SERVER_URL;
+const CA_KEY = process.env.CA_KEY;
+// Legacy single-company support (if CA_KEY not set)
 const API_KEY = process.env.API_KEY;
 const COMPANY_ID = process.env.COMPANY_ID;
-const TALLY_COMPANY_NAME = process.env.TALLY_COMPANY_NAME || "Company";
-const TALLY_GSTIN = process.env.TALLY_COMPANY_GSTIN || "";
-const TALLY_STATE = process.env.TALLY_COMPANY_STATE || "Kerala";
+
+console.log("─────────────────────────────────────────");
+console.log("🚀 Timber TallyAgent starting");
+console.log(`   SERVER_URL : ${SERVER_URL  || "❌ MISSING — set SERVER_URL in .env"}`);
+console.log(`   Mode       : ${CA_KEY ? `CA_KEY (${CA_KEY.slice(0, 10)}…)` : API_KEY ? `Legacy API_KEY + COMPANY_ID=${COMPANY_ID}` : "❌ No auth key found in .env"}`);
+console.log("─────────────────────────────────────────");
+
+if (!SERVER_URL) {
+  console.error("❌ SERVER_URL is not set. Copy your .env into this directory and restart.");
+  process.exit(1);
+}
+
+// Companies fetched dynamically via agent-init (CA_KEY mode)
+// or set from env (legacy mode)
+let companies = COMPANY_ID
+  ? [{ company_id: COMPANY_ID, tally_company_name: process.env.TALLY_COMPANY_NAME || "Company", gstin: process.env.TALLY_COMPANY_GSTIN || "", state: process.env.TALLY_COMPANY_STATE || "Kerala" }]
+  : [];
+
+// Per-company context vars (updated before each company's sync cycle)
+let TALLY_GSTIN = process.env.TALLY_COMPANY_GSTIN || "";
+let TALLY_STATE = process.env.TALLY_COMPANY_STATE || "Kerala";
+
+async function fetchTallyCompanies() {
+  // Day Book is the only safe exportable report in Tally Prime.
+  // Tally always embeds <SVCURRENTCOMPANY> in the XML response header.
+  // "List of Companies" doesn't exist; "Company Summary" / "COMPANY MASTER"
+  // trigger TDL error dialogs inside Tally Prime's UI — do not use them.
+  const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+  const xml = `<?xml version="1.0"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE>${today}</SVFROMDATE><SVTODATE>${today}</SVTODATE></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
+  try {
+    const res = await axios.post(TALLY_URL, xml, { headers: { "Content-Type": "application/xml" }, timeout: 5000 });
+    console.log("[fetchTallyCompanies] Day Book header:", res.data.substring(0, 600));
+    const m = res.data.match(/<SVCURRENTCOMPANY>(.*?)<\/SVCURRENTCOMPANY>/i);
+    if (m && m[1].trim()) {
+      const name = m[1].trim();
+      console.log("[fetchTallyCompanies] Current company:", name);
+      return [name];
+    }
+    console.warn("[fetchTallyCompanies] <SVCURRENTCOMPANY> not found in response — no company open in Tally?");
+    return [];
+  } catch (e) {
+    console.warn("[fetchTallyCompanies] Tally not reachable:", e.message);
+    return [];
+  }
+}
+
+async function agentInit() {
+  if (!CA_KEY) {
+    console.log(`[agent-init] Legacy mode — using COMPANY_ID=${COMPANY_ID}`);
+    return;
+  }
+  console.log(`[agent-init] Fetching company list from server…`);
+  try {
+    const tally_companies = await fetchTallyCompanies();
+    if (tally_companies.length > 0) {
+      console.log(`[agent-init] Open Tally companies: ${tally_companies.join(", ")}`);
+    }
+    const res = await axios.post(`${SERVER_URL}/webhook`, { caKey: CA_KEY, event: "agent-init", tally_companies });
+    companies = res.data.companies || [];
+    if (companies.length === 0) {
+      console.warn("[agent-init] ⚠️  No companies returned. Enable sync for at least one client in Timber → CA Settings → Integrations.");
+    } else {
+      console.log(`[agent-init] ✅ ${companies.length} company/companies loaded:`);
+      companies.forEach(c => console.log(`   • company_id=${c.company_id}  tally="${c.tally_company_name}"  gstin=${c.gstin || "—"}`));
+    }
+  } catch (err) {
+    console.error("[agent-init] ❌ Failed:", err.response?.data || err.message);
+  }
+}
 fs.appendFileSync(require("path").join(__dirname, "agent-run-log.txt"), `${SERVER_URL} agent.js started at ${new Date()}\n`);
 const TALLY_URL = "http://localhost:9000";
 
@@ -333,11 +401,11 @@ function extractLineError(tallyResponse) {
 }
 
 // 📝 Reports sync status to server
-async function reportStatus(invoiceId, status, errorMsg, tallyVoucherNumber) {
+async function reportStatus(invoiceId, status, errorMsg, tallyVoucherNumber, companyId) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY,
-      company_id: COMPANY_ID,
+      ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+      company_id: companyId || COMPANY_ID,
       event: "sync-status",
       data: { invoiceId, status, error: errorMsg || "", tallyVoucherNumber }
     });
@@ -958,10 +1026,11 @@ async function fetchTallyPurchaseVoucherNumber(dateStr, vendorName, total) {
   return null;
 }
 
-async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber) {
+async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber, companyId) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID,
+      ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+      company_id: companyId || COMPANY_ID,
       event: 'bill-sync-status',
       data: { billId, status, error: errorMsg || '', tallyVoucherNumber }
     });
@@ -971,40 +1040,44 @@ async function reportBillStatus(billId, status, errorMsg, tallyVoucherNumber) {
 }
 
 async function billLoop() {
-  try {
-    const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID, event: 'bill-sync-request'
-    });
-    const bills = res.data.bills || [];
-    console.log(`🧾 Processing ${bills.length} bill(s)`);
-    for (const bill of bills) {
-      try {
-        await ensurePurchaseMasterData(bill);
-        const xml = buildPurchaseXML(bill);
-        console.log(`[bill] Purchase XML for ${bill.id}:`, xml);
-        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[bill] Tally response for ${bill.id}:`, tallyRes.data);
-        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
-        const lineError = extractLineError(tallyRes.data);
-        if (lineError) throw new Error(`Purchase creation failed: ${lineError}`);
-        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
-          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
-          throw new Error(`Purchase had exceptions: ${detail}`);
+  for (const company of companies) {
+    const { company_id, gstin, state } = company;
+    TALLY_GSTIN = gstin; TALLY_STATE = state;
+    try {
+      const res = await axios.post(`${SERVER_URL}/webhook`, {
+        ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+        company_id,
+        event: 'bill-sync-request'
+      });
+      const bills = res.data.bills || [];
+      console.log(`🧾 [${company_id}] Processing ${bills.length} bill(s)`);
+      for (const bill of bills) {
+        try {
+          await ensurePurchaseMasterData(bill);
+          const xml = buildPurchaseXML(bill);
+          const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+          if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+          const lineError = extractLineError(tallyRes.data);
+          if (lineError) throw new Error(`Purchase creation failed: ${lineError}`);
+          const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+          if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+            const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
+            throw new Error(`Purchase had exceptions: ${detail}`);
+          }
+          const rawDate = bill.bill_date || new Date().toISOString();
+          const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+            .split('T')[0].replace(/-/g, '');
+          const tallyVoucherNumber = await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount);
+          console.log(`✅ Bill ${bill.id} synced, voucher: ${tallyVoucherNumber}`);
+          await reportBillStatus(bill.id, 'success', null, tallyVoucherNumber, company_id);
+        } catch (err) {
+          console.error(`❌ Bill ${bill.id} failed:`, err.message);
+          await reportBillStatus(bill.id, 'error', err.message, null, company_id);
         }
-        const rawDate = bill.bill_date || new Date().toISOString();
-        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
-          .split('T')[0].replace(/-/g, '');
-        const tallyVoucherNumber = await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount);
-        console.log(`✅ Bill ${bill.id} synced, voucher: ${tallyVoucherNumber}`);
-        await reportBillStatus(bill.id, 'success', null, tallyVoucherNumber);
-      } catch (err) {
-        console.error(`❌ Bill ${bill.id} failed:`, err.message);
-        await reportBillStatus(bill.id, 'error', err.message);
       }
+    } catch (err) {
+      console.error(`❌ Bill loop [${company_id}] error:`, err.response?.data?.message || err.response?.data?.error || err.message);
     }
-  } catch (err) {
-    console.error('❌ Bill loop error:', err.response?.data?.message || err.response?.data?.error || err.message);
   }
 }
 
@@ -1033,11 +1106,11 @@ async function ensureCashLedger() {
   }
 }
 
-async function reportPaymentStatus(paymentId, status, errorMsg, receiptNumber) {
+async function reportPaymentStatus(paymentId, status, errorMsg, receiptNumber, companyId) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY,
-      company_id: COMPANY_ID,
+      ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+      company_id: companyId || COMPANY_ID,
       event: 'payment-sync-status',
       data: { paymentId, status, error: errorMsg || '', receiptNumber }
     });
@@ -1092,121 +1165,112 @@ async function fetchTallyReceiptNumber(dateStr, partyName, amount) {
 }
 
 async function paymentLoop() {
-  try {
-    const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY,
-      company_id: COMPANY_ID,
-      event: 'payment-sync-request'
-    });
+  for (const company of companies) {
+    const { company_id, gstin, state } = company;
+    TALLY_GSTIN = gstin; TALLY_STATE = state;
+    try {
+      const res = await axios.post(`${SERVER_URL}/webhook`, {
+        ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+        company_id,
+        event: 'payment-sync-request'
+      });
 
-    const payments = res.data.payments || [];
-    console.log(`💰 Processing ${payments.length} payment(s)`);
+      const payments = res.data.payments || [];
+      console.log(`💰 [${company_id}] Processing ${payments.length} payment(s)`);
 
-    for (const p of payments) {
-      try {
-        await ensureCashLedger();
-        const xml = buildReceiptXML(p);
-        console.log(`[payment] Receipt XML for ${p.id}:`, xml);
-        const tallyRes = await axios.post(TALLY_URL, xml, {
-          headers: { 'Content-Type': 'application/xml' }
-        });
+      for (const p of payments) {
+        try {
+          await ensureCashLedger();
+          const xml = buildReceiptXML(p);
+          const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
 
-        console.log(`[payment] Tally response for ${p.id}:`, tallyRes.data);
+          if (tallyRes.data.includes('Unknown Request'))
+            throw new Error('Tally rejected receipt: Unknown Request');
+          const lineError = extractLineError(tallyRes.data);
+          if (lineError) throw new Error(`Receipt creation failed: ${lineError}`);
 
-        if (tallyRes.data.includes('Unknown Request'))
-          throw new Error('Tally rejected receipt: Unknown Request');
-        const lineError = extractLineError(tallyRes.data);
-        if (lineError) throw new Error(`Receipt creation failed: ${lineError}`);
+          const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+          if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+            const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || tallyRes.data.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i) || [])[1] || 'no detail';
+            throw new Error(`Receipt creation had exceptions: ${detail}`);
+          }
 
-        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
-          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || tallyRes.data.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i) || [])[1] || 'no detail';
-          throw new Error(`Receipt creation had exceptions: ${detail}`);
+          const rawDate = p.date || new Date().toISOString();
+          const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+            .split('T')[0].replace(/-/g, '');
+          const receiptNumber = await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount);
+          console.log(`✅ Payment ${p.id} synced, receipt: ${receiptNumber}`);
+          await reportPaymentStatus(p.id, 'success', null, receiptNumber, company_id);
+        } catch (err) {
+          console.error(`❌ Payment ${p.id} failed:`, err.message);
+          await reportPaymentStatus(p.id, 'error', err.message, null, company_id);
         }
-
-        const rawDate = p.date || new Date().toISOString();
-        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
-          .split('T')[0].replace(/-/g, '');
-        const receiptNumber = await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount);
-        console.log(`✅ Payment ${p.id} synced, receipt: ${receiptNumber}`);
-        await reportPaymentStatus(p.id, 'success', null, receiptNumber);
-      } catch (err) {
-        console.error(`❌ Payment ${p.id} failed:`, err.message);
-        await reportPaymentStatus(p.id, 'error', err.message);
       }
+    } catch (err) {
+      console.error(`❌ Payment loop [${company_id}] error:`, err.response?.data?.message || err.message);
     }
-  } catch (err) {
-    console.error('❌ Payment loop error:', err.response?.data?.message || err.message);
   }
 }
 
 // 🔄 Main loop
 async function mainLoop() {
-  try {
-    const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY,
-      company_id: COMPANY_ID,
-      event: "sync-request",
-    });
+  for (const company of companies) {
+    const { company_id, gstin, state } = company;
+    TALLY_GSTIN = gstin; TALLY_STATE = state;
+    try {
+      const res = await axios.post(`${SERVER_URL}/webhook`, {
+        ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+        company_id,
+        event: "sync-request",
+      });
 
-    const invoices = res.data.invoices || [];
-    console.log(`📋 Processing ${invoices.length} invoice(s)`);
+      const invoices = res.data.invoices || [];
+      console.log(`📋 [${company_id}] Processing ${invoices.length} invoice(s)`);
 
-    for (let invoice of invoices) {
-      try {
-        console.log(`🔄 Processing invoice ${invoice.id}`);
-        await ensureMasterData(invoice);
+      for (let invoice of invoices) {
+        try {
+          console.log(`🔄 Processing invoice ${invoice.id}`);
+          await ensureMasterData(invoice);
 
-        const xml = buildInvoiceXML(invoice);
-        console.log("🔧 Creating invoice XML:", xml);
-        
-        const tallyRes = await axios.post(TALLY_URL, xml, {
-          headers: { "Content-Type": "application/xml" },
-        });
+          const xml = buildInvoiceXML(invoice);
+          const tallyRes = await axios.post(TALLY_URL, xml, { headers: { "Content-Type": "application/xml" } });
 
-        console.log("📥 Invoice response:", tallyRes.data);
-        require("fs").writeFileSync("invoice.xml", xml);
-        require("fs").writeFileSync("tally-response.xml", tallyRes.data);
+          require("fs").writeFileSync("invoice.xml", xml);
+          require("fs").writeFileSync("tally-response.xml", tallyRes.data);
 
-        if (tallyRes.data.includes("Unknown Request")) {
-          throw new Error("Tally rejected the request: Unknown Request — check XML structure or ensure a company is open in Tally Prime");
+          if (tallyRes.data.includes("Unknown Request")) {
+            throw new Error("Tally rejected the request: Unknown Request — check XML structure or ensure a company is open in Tally Prime");
+          }
+
+          const invoiceError = extractLineError(tallyRes.data);
+          if (invoiceError) throw new Error(`Invoice creation failed: ${invoiceError}`);
+
+          const responseText = tallyRes.data;
+          const exceptionsMatch = responseText.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+          const exceptions = exceptionsMatch ? parseInt(exceptionsMatch[1]) : 0;
+          if (exceptions > 0) {
+            const errorMatch = responseText.match(/<ERROR>(.*?)<\/ERROR>/i);
+            const exceptionMatch = responseText.match(/<EXCEPTION>(.*?)<\/EXCEPTION>/i);
+            const errListMatch = responseText.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i);
+            const detail = errorMatch?.[1] || exceptionMatch?.[1] || errListMatch?.[1]?.trim() || "no detail returned by Tally";
+            throw new Error(`Invoice creation had exceptions: ${detail}`);
+          }
+
+          console.log(`✅ Synced invoice ${invoice.id}`);
+          const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
+          const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
+            .split("T")[0].replace(/-/g, "");
+          const partyName = invoice.customer?.name || invoice.customerName || "";
+          const tallyVoucherNumber = await fetchTallyVoucherNumber(dateStr, partyName, invoice.total);
+          await reportStatus(invoice.id, "success", null, tallyVoucherNumber, company_id);
+        } catch (err) {
+          console.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);
+          await reportStatus(invoice.id, "error", err.message, null, company_id);
         }
-
-        const invoiceError = extractLineError(tallyRes.data);
-        if (invoiceError) {
-          throw new Error(`Invoice creation failed: ${invoiceError}`);
-        }
-
-        // Check for exceptions
-        const responseText = tallyRes.data;
-        const exceptionsMatch = responseText.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-        const exceptions = exceptionsMatch ? parseInt(exceptionsMatch[1]) : 0;
-        
-        if (exceptions > 0) {
-          const errorMatch = responseText.match(/<ERROR>(.*?)<\/ERROR>/i);
-          const exceptionMatch = responseText.match(/<EXCEPTION>(.*?)<\/EXCEPTION>/i);
-          const errListMatch = responseText.match(/<ERRLISTEX>([\s\S]*?)<\/ERRLISTEX>/i);
-          const detail = errorMatch?.[1] || exceptionMatch?.[1] || errListMatch?.[1]?.trim() || "no detail returned by Tally";
-          console.log(`⚠️ Invoice exception detail: ${detail}`);
-          console.log("⚠️ Full Tally response:", responseText);
-          throw new Error(`Invoice creation had exceptions: ${detail}`);
-        }
-
-        console.log(`✅ Synced invoice ${invoice.id}`);
-        const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
-        const dateStr = (typeof rawDate === "string" ? rawDate : new Date(rawDate).toISOString())
-          .split("T")[0].replace(/-/g, "");
-        const partyName = invoice.customer?.name || invoice.customerName || "";
-        const tallyVoucherNumber = await fetchTallyVoucherNumber(dateStr, partyName, invoice.total);
-        console.log(`[agent] Tally voucher number for ${invoice.id}: ${tallyVoucherNumber}`);
-        await reportStatus(invoice.id, "success", null, tallyVoucherNumber);
-      } catch (err) {
-        console.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);
-        await reportStatus(invoice.id, "error", err.message);
       }
+    } catch (err) {
+      console.error(`❌ Agent loop [${company_id}] error:`, err.response?.data?.message || err.message);
     }
-  } catch (err) {
-    console.error("❌ Agent loop error:", err.response?.data?.message || err.message);
   }
 }
 
@@ -1292,10 +1356,11 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount) {
   return null;
 }
 
-async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentNumber) {
+async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentNumber, companyId) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID,
+      ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+      company_id: companyId || COMPANY_ID,
       event: 'payment-made-sync-status',
       data: { paymentMadeId, status, error: errorMsg || '', paymentNumber }
     });
@@ -1305,40 +1370,44 @@ async function reportPaymentMadeStatus(paymentMadeId, status, errorMsg, paymentN
 }
 
 async function paymentMadeLoop() {
-  try {
-    const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID, event: 'payment-made-sync-request'
-    });
-    const payments = res.data.payments || [];
-    console.log(`💸 Processing ${payments.length} vendor payment(s)`);
-    for (const p of payments) {
-      try {
-        await ensureCashLedger();
-        const xml = buildPaymentVoucherXML(p);
-        console.log(`[payment-made] Payment XML for ${p.id}:`, xml);
-        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[payment-made] Tally response for ${p.id}:`, tallyRes.data);
-        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
-        const lineError = extractLineError(tallyRes.data);
-        if (lineError) throw new Error(`Payment creation failed: ${lineError}`);
-        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
-          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
-          throw new Error(`Payment had exceptions: ${detail}`);
+  for (const company of companies) {
+    const { company_id, gstin, state } = company;
+    TALLY_GSTIN = gstin; TALLY_STATE = state;
+    try {
+      const res = await axios.post(`${SERVER_URL}/webhook`, {
+        ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+        company_id,
+        event: 'payment-made-sync-request'
+      });
+      const payments = res.data.payments || [];
+      console.log(`💸 [${company_id}] Processing ${payments.length} vendor payment(s)`);
+      for (const p of payments) {
+        try {
+          await ensureCashLedger();
+          const xml = buildPaymentVoucherXML(p);
+          const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+          if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+          const lineError = extractLineError(tallyRes.data);
+          if (lineError) throw new Error(`Payment creation failed: ${lineError}`);
+          const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+          if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+            const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
+            throw new Error(`Payment had exceptions: ${detail}`);
+          }
+          const rawDate = p.date || new Date().toISOString();
+          const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+            .split('T')[0].replace(/-/g, '');
+          const paymentNumber = await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount);
+          console.log(`✅ Vendor payment ${p.id} synced, voucher: ${paymentNumber}`);
+          await reportPaymentMadeStatus(p.id, 'success', null, paymentNumber, company_id);
+        } catch (err) {
+          console.error(`❌ Vendor payment ${p.id} failed:`, err.message);
+          await reportPaymentMadeStatus(p.id, 'error', err.message, null, company_id);
         }
-        const rawDate = p.date || new Date().toISOString();
-        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
-          .split('T')[0].replace(/-/g, '');
-        const paymentNumber = await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount);
-        console.log(`✅ Vendor payment ${p.id} synced, voucher: ${paymentNumber}`);
-        await reportPaymentMadeStatus(p.id, 'success', null, paymentNumber);
-      } catch (err) {
-        console.error(`❌ Vendor payment ${p.id} failed:`, err.message);
-        await reportPaymentMadeStatus(p.id, 'error', err.message);
       }
+    } catch (err) {
+      console.error(`❌ Payment-made loop [${company_id}] error:`, err.response?.data?.message || err.message);
     }
-  } catch (err) {
-    console.error('❌ Payment-made loop error:', err.response?.data?.message || err.message);
   }
 }
 
@@ -1570,10 +1639,11 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amount) {
   return null;
 }
 
-async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumber) {
+async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumber, companyId) {
   try {
     await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID,
+      ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+      company_id: companyId || COMPANY_ID,
       event: 'expense-sync-status',
       data: { expenseId, status, error: errorMsg || '', tallyVoucherNumber }
     });
@@ -1583,53 +1653,67 @@ async function reportExpenseStatus(expenseId, status, errorMsg, tallyVoucherNumb
 }
 
 async function expenseLoop() {
-  try {
-    const res = await axios.post(`${SERVER_URL}/webhook`, {
-      apiKey: API_KEY, company_id: COMPANY_ID, event: 'expense-sync-request'
-    });
-    const expenses = res.data.expenses || [];
-    console.log(`🧾 Processing ${expenses.length} expense(s)`);
-    for (const expense of expenses) {
-      try {
-        await ensureExpenseMasterData(expense);
-        const xml = buildExpenseXML(expense);
-        console.log(`[expense] Payment XML for ${expense.id}:`, xml);
-        const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
-        console.log(`[expense] Tally response for ${expense.id}:`, tallyRes.data);
-        if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
-        const lineError = extractLineError(tallyRes.data);
-        if (lineError) throw new Error(`Expense creation failed: ${lineError}`);
-        const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
-        if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
-          const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
-          throw new Error(`Expense had exceptions: ${detail}`);
+  for (const company of companies) {
+    const { company_id, gstin, state } = company;
+    TALLY_GSTIN = gstin; TALLY_STATE = state;
+    try {
+      const res = await axios.post(`${SERVER_URL}/webhook`, {
+        ...(CA_KEY ? { caKey: CA_KEY } : { apiKey: API_KEY }),
+        company_id,
+        event: 'expense-sync-request'
+      });
+      const expenses = res.data.expenses || [];
+      console.log(`🧾 [${company_id}] Processing ${expenses.length} expense(s)`);
+      for (const expense of expenses) {
+        try {
+          await ensureExpenseMasterData(expense);
+          const xml = buildExpenseXML(expense);
+          const tallyRes = await axios.post(TALLY_URL, xml, { headers: { 'Content-Type': 'application/xml' } });
+          if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
+          const lineError = extractLineError(tallyRes.data);
+          if (lineError) throw new Error(`Expense creation failed: ${lineError}`);
+          const exceptionsMatch = tallyRes.data.match(/<EXCEPTIONS>(\d+)<\/EXCEPTIONS>/);
+          if (exceptionsMatch && parseInt(exceptionsMatch[1]) > 0) {
+            const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
+            throw new Error(`Expense had exceptions: ${detail}`);
+          }
+          const rawDate = expense.date || new Date().toISOString();
+          const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+            .split('T')[0].replace(/-/g, '');
+          const tallyVoucherNumber = await fetchTallyExpenseVoucherNumber(dateStr, expense.total);
+          console.log(`✅ Expense ${expense.id} synced, voucher: ${tallyVoucherNumber}`);
+          await reportExpenseStatus(expense.id, 'success', null, tallyVoucherNumber, company_id);
+        } catch (err) {
+          console.error(`❌ Expense ${expense.id} failed:`, err.message);
+          await reportExpenseStatus(expense.id, 'error', err.message, null, company_id);
         }
-        const rawDate = expense.date || new Date().toISOString();
-        const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
-          .split('T')[0].replace(/-/g, '');
-        const tallyVoucherNumber = await fetchTallyExpenseVoucherNumber(dateStr, expense.total);
-        console.log(`✅ Expense ${expense.id} synced, voucher: ${tallyVoucherNumber}`);
-        await reportExpenseStatus(expense.id, 'success', null, tallyVoucherNumber);
-      } catch (err) {
-        console.error(`❌ Expense ${expense.id} failed:`, err.message);
-        await reportExpenseStatus(expense.id, 'error', err.message);
       }
+    } catch (err) {
+      console.error(`❌ Expense loop [${company_id}] error:`, err.response?.data?.message || err.message);
     }
-  } catch (err) {
-    console.error('❌ Expense loop error:', err.response?.data?.message || err.message);
   }
 }
 
-// 🕒 Run every minute
-setInterval(mainLoop, 60 * 1000);
-setInterval(paymentLoop, 60 * 1000);
-setInterval(billLoop, 60 * 1000);
-setInterval(paymentMadeLoop, 60 * 1000);
-setInterval(expenseLoop, 60 * 1000);
-mainLoop();
-paymentLoop();
-billLoop();
-paymentMadeLoop();
-expenseLoop();
+const { runPull } = require('./tally-pull');
 
-require('./tally-pull');
+// 🕒 Initialise companies then start all sync loops
+agentInit().then(() => {
+  console.log(`[agent] Starting sync loops (${companies.length} companies active). Polling every 60s.`);
+  // Refresh company list every 5 minutes (picks up new clients added in Timber)
+  setInterval(agentInit, 5 * 60 * 1000);
+
+  setInterval(mainLoop, 60 * 1000);
+  setInterval(paymentLoop, 60 * 1000);
+  setInterval(billLoop, 60 * 1000);
+  setInterval(paymentMadeLoop, 60 * 1000);
+  setInterval(expenseLoop, 60 * 1000);
+  // Pull runs per company in CA_KEY mode, using the live companies array
+  setInterval(() => runPull(companies, CA_KEY), 60 * 1000);
+
+  mainLoop();
+  paymentLoop();
+  billLoop();
+  paymentMadeLoop();
+  expenseLoop();
+  runPull(companies, CA_KEY);
+});

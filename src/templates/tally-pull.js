@@ -1,10 +1,12 @@
-require('dotenv').config();
+require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 const axios = require('axios');
 
 const TALLY_URL  = 'http://localhost:9000';
 const SERVER_URL = process.env.SERVER_URL;
 const API_KEY    = process.env.API_KEY;
 const COMPANY_ID = process.env.COMPANY_ID;
+
+console.log(`[tally-pull] SERVER_URL=${SERVER_URL || '❌ MISSING'} | COMPANY_ID=${COMPANY_ID || '(none — CA_KEY mode)'} | API_KEY=${API_KEY ? '✓ set' : '(none)'}`);
 const PULL_DAYS  = parseInt(process.env.PULL_WINDOW_DAYS || '30', 10);
 
 function fmtDate(d) {
@@ -226,7 +228,14 @@ function parsePayments(xml) {
     return results;
 }
 
-async function pullLoop() {
+// Run one pull cycle for a single company.
+// auth is either { caKey, credential_id } (CA_KEY mode) or { apiKey, company_id } (legacy).
+async function pullOnce(auth) {
+    const { caKey, apiKey, company_id, credential_id } = auth;
+    const authPayload = caKey ? { caKey } : { apiKey };
+    let synced_count = 0;
+    let pull_error = null;
+
     try {
         const to = new Date();
         const from = new Date(to);
@@ -238,22 +247,16 @@ async function pullLoop() {
             timeout: 10000
         });
 
-
         const vouchers = parseVouchers(tallyRes.data);
         console.log(`[pull] ${vouchers.length} Sales vouchers found in Tally`);
-
         for (const v of vouchers) {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY,
-                    company_id: COMPANY_ID,
-                    event: 'tally-import',
-                    data: v
+                    ...authPayload, company_id, event: 'tally-import', data: v
                 });
+                if (r.data.imported) { synced_count++; }
                 console.log(`[pull] ${v.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
-            } catch (e) {
-                console.error(`[pull] ${v.voucher_number} failed:`, e.message);
-            }
+            } catch (e) { console.error(`[pull] ${v.voucher_number} failed:`, e.response?.data?.error || e.message); }
         }
 
         const purchases = parsePurchases(tallyRes.data);
@@ -261,12 +264,11 @@ async function pullLoop() {
         for (const p of purchases) {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY, company_id: COMPANY_ID, event: 'tally-purchase', data: p
+                    ...authPayload, company_id, event: 'tally-purchase', data: p
                 });
+                if (r.data.imported) { synced_count++; }
                 console.log(`[pull] purchase ${p.voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
-            } catch (e) {
-                console.error(`[pull] purchase ${p.voucher_number} failed:`, e.message);
-            }
+            } catch (e) { console.error(`[pull] purchase ${p.voucher_number} failed:`, e.response?.data?.error || e.message); }
         }
 
         const vendor_payments = parsePayments(tallyRes.data);
@@ -274,34 +276,65 @@ async function pullLoop() {
         for (const p of vendor_payments) {
             try {
                 const r = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY, company_id: COMPANY_ID, event: 'tally-payment', data: p
+                    ...authPayload, company_id, event: 'tally-payment', data: p
                 });
+                if (r.data.imported) { synced_count++; }
                 console.log(`[pull] payment ${p.payment_number} → bill ${p.bill_voucher_number}: ${r.data.imported ? 'imported' : r.data.reason}`);
-            } catch (e) {
-                console.error(`[pull] payment ${p.payment_number} failed:`, e.message);
-            }
+            } catch (e) { console.error(`[pull] payment ${p.payment_number} failed:`, e.response?.data?.error || e.message); }
         }
 
         const receipts = parseReceipts(tallyRes.data);
         console.log(`[pull] ${receipts.length} Receipt allocation(s) found in Tally`);
-
         for (const r of receipts) {
             try {
                 const resp = await axios.post(`${SERVER_URL}/webhook`, {
-                    apiKey: API_KEY,
-                    company_id: COMPANY_ID,
-                    event: 'tally-receipt',
-                    data: r
+                    ...authPayload, company_id, event: 'tally-receipt', data: r
                 });
+                if (resp.data.imported) { synced_count++; }
                 console.log(`[pull] receipt ${r.receipt_number} → inv ${r.invoice_voucher_number}: ${resp.data.imported ? 'imported' : resp.data.reason}`);
-            } catch (e) {
-                console.error(`[pull] receipt ${r.receipt_number} failed:`, e.message);
-            }
+            } catch (e) { console.error(`[pull] receipt ${r.receipt_number} failed:`, e.response?.data?.error || e.message); }
         }
     } catch (e) {
+        pull_error = e.message;
         console.error('[pull] loop error:', e.message);
+    }
+
+    // In CA mode, report summary so backend can record TallySyncLog + emit Pusher
+    if (caKey && credential_id) {
+        try {
+            await axios.post(`${SERVER_URL}/webhook`, {
+                caKey, company_id, event: 'sync-complete',
+                data: {
+                    credential_id,
+                    synced_records: synced_count,
+                    status: pull_error ? 'error' : 'success',
+                    error_message: pull_error || null,
+                },
+            });
+        } catch (e) {
+            console.error('[pull] sync-complete report failed:', e.response?.data?.error || e.message);
+        }
     }
 }
 
-setInterval(pullLoop, 60 * 1000);
-pullLoop();
+// Legacy single-company mode (COMPANY_ID + API_KEY in .env)
+async function pullLoop() {
+    await pullOnce({ apiKey: API_KEY, company_id: COMPANY_ID });
+}
+
+// CA mode: called by agent.js with the current companies list
+async function runPull(companies, caKey) {
+    if (!companies || companies.length === 0) return;
+    for (const company of companies) {
+        await pullOnce({ caKey, company_id: company.company_id, credential_id: company.credential_id });
+    }
+}
+
+module.exports = { runPull };
+
+// In legacy mode (no CA_KEY), run on its own interval
+const CA_KEY = process.env.CA_KEY;
+if (!CA_KEY) {
+    setInterval(pullLoop, 60 * 1000);
+    pullLoop();
+}

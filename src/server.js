@@ -2,8 +2,6 @@ require("dotenv").config();
 const express = require('express');
 const fs = require("fs-extra");
 const path = require("path");
-const { v4: uuidv4 } = require("uuid");
-const { spawn } = require("child_process");
 
 
 
@@ -66,113 +64,17 @@ let invoices=[
   }
 ]
 
-app.get("/download", async (req, res) => {
-  console.log("[download] Request received, query:", req.query);
-  try {
-    const companyId = req.query.companyId;
-    if (!companyId) {
-      console.log("[download] Missing companyId");
-      return res.status(400).send("Missing companyId");
-    }
-
-    const buildId = uuidv4();
-    const buildDir = path.join(__dirname, "installers", `build-${buildId}`);
-    console.log("[download] buildDir:", buildDir);
-
-    await fs.mkdir(buildDir, { recursive: true });
-    console.log("[download] buildDir created");
-
-    console.log("[download] Copying agent.js...");
-    await fs.copyFile(
-      path.join(__dirname, "templates", "agent.js"),
-      path.join(buildDir, "agent.js")
-    );
-
-    console.log("[download] Copying tally-pull.js...");
-    await fs.copyFile(
-      path.join(__dirname, "templates", "tally-pull.js"),
-      path.join(buildDir, "tally-pull.js")
-    );
-
-    console.log("[download] Copying install-service.js...");
-    await fs.copyFile(
-      path.join(__dirname, "templates", "install-service.js"),
-      path.join(buildDir, "install-service.js")
-    );
-
-    console.log("[download] Copying package.json...");
-    await fs.copyFile(
-      path.join(__dirname, "templates", "package.json"),
-      path.join(buildDir, "package.json")
-    );
-
-    console.log("[download] Copying node_modules (this may take a while)...");
-    await fs.copy(
-      path.join(__dirname, "templates", "node_modules"),
-      path.join(buildDir, "node_modules"),
-      { overwrite: false, errorOnExist: false }
-    );
-    console.log("[download] node_modules copied");
-
-    const dynamicEnv = `COMPANY_ID=${companyId}\nAPI_KEY=${process.env.API_KEY}\nSERVER_URL=${process.env.SERVER_URL || 'https://defaultserver.com'}\n`;
-    await fs.writeFile(path.join(buildDir, ".env"), dynamicEnv);
-    console.log("[download] .env written");
-
-    const issTemplatePath = path.join(__dirname, "templates", "installer.iss");
-    console.log("[download] Reading installer.iss from:", issTemplatePath);
-    const issTemplate = await fs.readFile(issTemplatePath, "utf-8");
-
-    const dynamicIss = issTemplate
-      .replace(/OutputDir=.*/g, `OutputDir=${buildDir.replace(/\\/g, "\\\\")}`)
-      .replace(/OutputBaseFilename=.*/g, `OutputBaseFilename=TallyAgent-${companyId}`);
-
-    const dynamicIssPath = path.join(buildDir, "installer.iss");
-    await fs.writeFile(dynamicIssPath, dynamicIss);
-    console.log("[download] dynamic installer.iss written:", dynamicIssPath);
-    console.log("[download] ISS content:\n", dynamicIss);
-
-    const isccPath = process.env.ISCC_PATH || "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe";
-    console.log("[download] Spawning ISCC:", isccPath);
-    console.log("[download] ISCC exists:", fs.existsSync(isccPath));
-
-    const iscc = spawn(isccPath, [dynamicIssPath], {
-      cwd: buildDir,
-      env: process.env,
-    });
-
-    iscc.on("error", (err) => {
-      console.error("[download] Failed to spawn ISCC:", err.message);
-      if (!res.headersSent) res.status(500).send(`ISCC spawn failed: ${err.message}`);
-    });
-
-    iscc.stdout.on("data", (data) => console.log(`[ISCC] ${data}`));
-    iscc.stderr.on("data", (data) => console.error(`[ISCC ERROR] ${data}`));
-
-    iscc.on("close", (code) => {
-      console.log(`[download] ISCC exited with code ${code}`);
-      if (code !== 0) {
-        return res.status(500).send(`Installer compilation failed (ISCC exit code ${code})`);
-      }
-
-      const outputExe = path.join(buildDir, `TallyAgent-${companyId}.exe`);
-      console.log("[download] Looking for exe:", outputExe);
-      console.log("[download] Exe exists:", fs.existsSync(outputExe));
-
-      if (!fs.existsSync(outputExe)) {
-        return res.status(500).send("Installer .exe not found after compilation.");
-      }
-
-      console.log("[download] Sending file to client...");
-      res.download(outputExe, `TallyAgent-${companyId}.exe`, (err) => {
-        if (err) console.error("[download] res.download error:", err.message);
-        else console.log("[download] File sent successfully");
-      });
-    });
-
-  } catch (error) {
-    console.error("[download] Caught error:", error);
-    if (!res.headersSent) res.status(500).send(`Server error: ${error.message}`);
+// Serve the pre-built static installer.
+// Build once with Inno Setup and set INSTALLER_PATH in .env.
+// In production, host the .exe on Azure Blob and set INSTALLER_BLOB_URL instead.
+app.get("/download", (req, res) => {
+  const installerPath = process.env.INSTALLER_PATH || path.join(__dirname, "dist", "TallyAgent-Setup.exe");
+  if (!fs.existsSync(installerPath)) {
+    return res.status(503).send("Installer not yet built. Run Inno Setup on templates/installer.iss first.");
   }
+  res.download(installerPath, "TallyAgent-Setup.exe", (err) => {
+    if (err) console.error("[download] error:", err.message);
+  });
 });
 
 
