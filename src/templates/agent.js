@@ -1,11 +1,13 @@
 require("dotenv").config({ path: require("path").join(__dirname, ".env") });
 const fs = require("fs");
+const path = require("path");
 
 const axios = require("axios");
 const { create } = require("xmlbuilder2");
 
 const SERVER_URL = process.env.SERVER_URL;
 const CA_KEY = process.env.CA_KEY;
+const AGENT_VERSION = process.env.AGENT_VERSION || null;
 // Legacy single-company support (if CA_KEY not set)
 const API_KEY = process.env.API_KEY;
 const COMPANY_ID = process.env.COMPANY_ID;
@@ -73,6 +75,25 @@ async function agentInit() {
     } else {
       console.log(`[agent-init] ✅ ${companies.length} company/companies loaded:`);
       companies.forEach(c => console.log(`   • company_id=${c.company_id}  tally="${c.tally_company_name}"  gstin=${c.gstin || "—"}`));
+    }
+
+    // Auto-update check
+    const latest_version = res.data.latest_version;
+    const download_url = res.data.agent_download_url;
+    if (latest_version && AGENT_VERSION && latest_version !== AGENT_VERSION && download_url) {
+      console.log(`[agent-init] 🔄 New version available: ${latest_version} (current: ${AGENT_VERSION}). Downloading…`);
+      try {
+        const exeRes = await axios.get(download_url, { responseType: "arraybuffer", timeout: 60000 });
+        const exePath = path.join(__dirname, "TallyAgent-update.exe");
+        fs.writeFileSync(exePath, Buffer.from(exeRes.data));
+        console.log(`[agent-init] ✅ Update downloaded to ${exePath}. Restarting service to apply…`);
+        // Signal service manager to restart (works with node-windows / NSSM)
+        process.exit(0);
+      } catch (updateErr) {
+        console.error("[agent-init] ⚠️  Auto-update failed — will retry next cycle:", updateErr.message);
+      }
+    } else if (latest_version) {
+      console.log(`[agent-init] ✅ Agent is up to date (v${AGENT_VERSION || latest_version})`);
     }
   } catch (err) {
     console.error("[agent-init] ❌ Failed:", err.response?.data || err.message);
