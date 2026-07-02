@@ -1,0 +1,55 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Timber TallyAgent</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div id="app">
+    <div id="titlebar">
+      <div class="brand">
+        <img src="assets/icon.png" alt="" />
+        <span>Timber TallyAgent</span>
+        <span id="app-version" class="app-version"></span>
+      </div>
+      <div class="actions">
+        <button id="update-button" class="pill-button update hidden">Download App</button>
+        <button id="menu-button" class="icon-button" title="Menu">&#8942;</button>
+        <button id="minimize-button" class="icon-button" title="Minimize">&#8212;</button>
+        <button id="close-button" class="icon-button" title="Close">&#10005;</button>
+      </div>
+    </div>
+
+    <div id="status-row" class="hidden">
+      <div class="status-text">
+        <span id="status-dot" class="status-dot"></span>
+        <span id="status-label">Checking Tally&hellip;</span>
+      </div>
+      <button id="refresh-link" class="refresh-link">&#8635; Refresh</button>
+    </div>
+
+    <div id="setup-screen" class="hidden">
+      <img src="assets/icon.png" alt="" width="48" height="48" />
+      <h3>Connect to Timber</h3>
+      <p>Paste the Agent Key from Timber &rarr; CA Settings &rarr; Integrations</p>
+      <input id="setup-key-input" type="text" placeholder="Agent Key" />
+      <div id="setup-error" class="setup-error"></div>
+      <button id="setup-submit">Connect</button>
+    </div>
+
+    <div id="company-list" class="hidden"></div>
+
+    <div id="empty-state" class="hidden">
+      <img src="assets/icon.png" alt="" />
+      <div>No companies syncing yet</div>
+    </div>
+
+    <div id="footer">
+      <a href="mailto:support@timber.me">&#9993; support@timber.me</a>
+    </div>
+  </div>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

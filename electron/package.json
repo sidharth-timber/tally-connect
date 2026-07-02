@@ -1,0 +1,55 @@
+{
+  "name": "timber-tallyagent",
+  "productName": "Timber TallyAgent",
+  "version": "1.0.0",
+  "description": "Timber TallyAgent desktop app — syncs financial data with Tally Prime",
+  "main": "src/main/index.js",
+  "author": "Timber Technologies",
+  "license": "ISC",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "start:setup": "set TALLYAGENT_TEST_MODE=1&& electron .",
+    "dist": "electron-builder",
+    "sync-engine:cli": "node scripts/sync-engine-cli.js",
+    "reset": "node scripts/reset-userdata.js"
+  },
+  "dependencies": {
+    "axios": "^1.11.0",
+    "dotenv": "^17.2.1",
+    "electron-store": "^8.2.0",
+    "electron-updater": "^6.3.9",
+    "xmlbuilder2": "^3.1.1"
+  },
+  "devDependencies": {
+    "electron": "^32.2.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.timber.tallyagent",
+    "productName": "Timber TallyAgent",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "build/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "TallyAgent-Setup.exe",
+      "include": "build/installer.nsh"
+    },
+    "publish": {
+      "provider": "generic",
+      "url": "https://your-timber-backend.com/tallyagent-releases/"
+    }
+  }
+}
