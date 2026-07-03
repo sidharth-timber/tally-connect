@@ -1,7 +1,7 @@
 const { ipcMain, shell } = require('electron');
 const { getMainWindow } = require('./window');
 const { submitAgentKey, hasCompletedSetup } = require('./firstRun');
-const { checkForUpdates, downloadUpdate, quitAndInstall } = require('./autoUpdate');
+const { downloadUpdate, quitAndInstall } = require('./autoUpdate');
 const store = require('./config-store');
 
 // Timber's web app — CA Settings → Integrations page. Fixed destination for
@@ -26,16 +26,17 @@ function registerIpcHandlers(engine) {
     return result;
   });
 
-  // The renderer calls this for both "Download App" (idle, first check) and
-  // "Update App" (already know one's available) — check first since
-  // electron-updater needs a resolved checkForUpdates() before downloadUpdate()
-  // knows what to fetch.
+  // The update installer comes from the backend (agent-init's
+  // agent_download_url — the exe the admin uploaded to storage), not from an
+  // electron-updater feed. Status updates go to both the engine state and the
+  // update:status channel so the pill stays correct across re-renders.
   ipcMain.handle('update:download', async () => {
-    const result = await checkForUpdates();
-    if (result?.updateInfo && result.isUpdateAvailable !== false) {
-      return downloadUpdate();
-    }
-    return null;
+    const { downloadUrl } = engine.getState();
+    return downloadUpdate(downloadUrl, (payload) => {
+      engine.setUpdateStatus(payload.status);
+      const win = getMainWindow();
+      if (win && !win.isDestroyed()) win.webContents.send('update:status', payload);
+    });
   });
   ipcMain.on('update:quit-and-install', () => quitAndInstall());
 

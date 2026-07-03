@@ -26,7 +26,6 @@ const { createSyncEngine } = require('../sync-engine');
 const { createMainWindow, getMainWindow, markQuitting } = require('./window');
 const { createTray } = require('./tray');
 const { registerIpcHandlers } = require('./ipc');
-const { initAutoUpdate } = require('./autoUpdate');
 const { hasCompletedSetup } = require('./firstRun');
 
 // Prevent a second instance from spawning a duplicate sync engine against the
@@ -96,7 +95,5 @@ if (!gotLock) {
     if (hasCompletedSetup() && !TEST_MODE) {
       engine.start();
     }
-
-    initAutoUpdate();
   });
 }

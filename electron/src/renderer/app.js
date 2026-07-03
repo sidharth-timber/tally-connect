@@ -53,7 +53,7 @@ async function boot() {
       const state = await window.tallyAgent.getState();
       if (state.updateStatus === 'ready') {
         window.tallyAgent.quitAndInstall();
-      } else if (state.updateStatus === 'available' || state.updateStatus === 'idle') {
+      } else if (['available', 'idle', 'error'].includes(state.updateStatus)) {
         window.tallyAgent.downloadUpdate();
       }
     },

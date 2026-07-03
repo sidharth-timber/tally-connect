@@ -1,46 +1,79 @@
-const { autoUpdater } = require('electron-updater');
-const { getMainWindow, markQuitting } = require('./window');
+const { app } = require('electron');
+const axios = require('axios');
+const fs = require('fs');
+const path = require('path');
+const { spawn } = require('child_process');
+const { markQuitting } = require('./window');
 
-function send(channel, payload) {
-  const win = getMainWindow();
-  if (win && !win.isDestroyed()) win.webContents.send(channel, payload);
-}
+// Updates don't use electron-updater / a static latest.yml feed: the admin
+// uploads the new installer exe to storage, and the backend hands its URL to
+// the agent in the agent-init response (agent_download_url → state.downloadUrl).
+// This downloads that exe and, on "Restart to Update", runs it silently —
+// same flow the legacy service agent used (see src/templates/agent.js).
 
-// No real update feed is hosted yet (package.json's publish.url is a
-// placeholder — see plan's auto-update section: repointing it at a real
-// static host is backend work that hasn't happened). Checking automatically
-// on every launch would mean every user hits a guaranteed DNS failure for a
-// domain that doesn't exist, so this only wires up listeners; the actual
-// network check happens on demand (see checkForUpdates), e.g. when the user
-// clicks the "Update App" pill.
-function initAutoUpdate() {
-  autoUpdater.autoDownload = false;
+let downloadedInstallerPath = null;
+let downloading = false;
 
-  autoUpdater.on('checking-for-update', () => send('update:status', { status: 'checking' }));
-  autoUpdater.on('update-available', (info) => send('update:status', { status: 'available', info }));
-  autoUpdater.on('update-not-available', () => send('update:status', { status: 'idle' }));
-  autoUpdater.on('download-progress', (progress) => send('update:status', { status: 'downloading', progress }));
-  autoUpdater.on('update-downloaded', () => send('update:status', { status: 'ready' }));
-  autoUpdater.on('error', (err) => send('update:status', { status: 'error', error: err.message }));
-}
+// onStatus receives the same payload shape the renderer's update pill expects:
+// { status: 'downloading'|'ready'|'error', progress?, error? }
+async function downloadUpdate(downloadUrl, onStatus = () => {}) {
+  if (downloading) return { ok: false, error: 'Download already in progress' };
+  if (!downloadUrl) {
+    const error = 'No download URL provided by server yet.';
+    onStatus({ status: 'error', error });
+    return { ok: false, error };
+  }
 
-async function checkForUpdates() {
+  downloading = true;
+  const dir = path.join(app.getPath('userData'), 'updates');
+  const dest = path.join(dir, 'TallyAgent-Setup.exe');
   try {
-    return await autoUpdater.checkForUpdates();
+    fs.mkdirSync(dir, { recursive: true });
+    onStatus({ status: 'downloading', progress: { percent: 0 } });
+
+    const res = await axios.get(downloadUrl, { responseType: 'stream', timeout: 10 * 60 * 1000 });
+    const total = parseInt(res.headers['content-length'], 10) || 0;
+    let transferred = 0;
+    let lastPercent = -1;
+
+    await new Promise((resolve, reject) => {
+      const out = fs.createWriteStream(dest);
+      res.data.on('data', (chunk) => {
+        transferred += chunk.length;
+        if (total > 0) {
+          const percent = Math.floor((transferred / total) * 100);
+          if (percent !== lastPercent) {
+            lastPercent = percent;
+            onStatus({ status: 'downloading', progress: { percent, transferred, total } });
+          }
+        }
+      });
+      res.data.on('error', reject);
+      out.on('error', reject);
+      out.on('finish', resolve);
+      res.data.pipe(out);
+    });
+
+    downloadedInstallerPath = dest;
+    onStatus({ status: 'ready' });
+    return { ok: true, path: dest };
   } catch (err) {
-    console.error('[auto-update] check failed (no update feed configured yet?):', err.message);
-    send('update:status', { status: 'error', error: err.message });
-    return null;
+    try { fs.unlinkSync(dest); } catch (_) {}
+    console.error('[auto-update] download failed:', err.message);
+    onStatus({ status: 'error', error: err.message });
+    return { ok: false, error: err.message };
+  } finally {
+    downloading = false;
   }
 }
 
-function downloadUpdate() {
-  return autoUpdater.downloadUpdate();
-}
-
 function quitAndInstall() {
+  if (!downloadedInstallerPath) return;
   markQuitting();
-  autoUpdater.quitAndInstall();
+  // electron-builder NSIS installers accept /S (silent) and --force-run
+  // (relaunch the app once the install finishes).
+  spawn(downloadedInstallerPath, ['/S', '--force-run'], { detached: true, stdio: 'ignore' }).unref();
+  app.quit();
 }
 
-module.exports = { initAutoUpdate, checkForUpdates, downloadUpdate, quitAndInstall };
+module.exports = { downloadUpdate, quitAndInstall };

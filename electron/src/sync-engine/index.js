@@ -144,7 +144,11 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       }
       state.latestVersion = latestVersion;
       state.downloadUrl = downloadUrl;
-      state.updateStatus = isNewerVersion(latestVersion, agentVersion) ? 'available' : 'idle';
+      // Don't clobber a download in progress (or one waiting for the user to
+      // restart) — those statuses are owned by main/autoUpdate.js.
+      if (!['downloading', 'ready'].includes(state.updateStatus)) {
+        state.updateStatus = isNewerVersion(latestVersion, agentVersion) ? 'available' : 'idle';
+      }
       emitter.emit('agent-init', { latestVersion, downloadUrl });
     } catch (err) {
       console.error('[sync-engine] agentInit failed:', err.response?.data || err.message);
@@ -190,6 +194,14 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     return state;
   }
 
+  // Called from main/ipc.js as the installer download progresses, so the
+  // engine's state (the renderer's source of truth on every state-changed
+  // re-render) agrees with the transient update:status events.
+  function setUpdateStatus(status) {
+    state.updateStatus = status;
+    emitState();
+  }
+
   // Used when the Agent Key is set/changed from the first-run setup screen —
   // updates credentials in place and restarts the loops, without tearing down
   // the EventEmitter instance other modules (tray, IPC) already subscribed to.
@@ -210,6 +222,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     refresh,
     syncCompany,
     getState,
+    setUpdateStatus,
     updateAuth,
     on: emitter.on.bind(emitter),
     off: emitter.off.bind(emitter),
