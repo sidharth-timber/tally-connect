@@ -3,6 +3,7 @@ const { getMainWindow } = require('./window');
 const { submitAgentKey, hasCompletedSetup } = require('./firstRun');
 const { downloadUpdate, quitAndInstall } = require('./autoUpdate');
 const store = require('./config-store');
+const { performLogout, showAppMenu } = require('./logout');
 
 // Timber's web app — CA Settings → Integrations page. Fixed destination for
 // the "Web View" button (not per-company; there's no per-company URL from
@@ -18,6 +19,8 @@ function registerIpcHandlers(engine) {
   ipcMain.handle('sync:company', (_e, companyId) => engine.syncCompany(companyId));
 
   ipcMain.handle('setup:has-completed', () => hasCompletedSetup());
+  ipcMain.handle('auth:logout', () => performLogout(engine));
+  ipcMain.on('menu:show', () => showAppMenu(engine));
   ipcMain.handle('setup:submit-key', async (_e, key) => {
     const result = await submitAgentKey(key);
     if (result.ok) {

@@ -2,7 +2,7 @@ import { initTitlebar, renderUpdateButton } from './components/titlebar.js';
 import { initStatusRow, renderStatusRow } from './components/statusRow.js';
 import { renderCompanyRow } from './components/companyRow.js';
 import { renderEmptyState } from './components/emptyState.js';
-import { initSetupScreen, showSetupScreen } from './components/setupScreen.js';
+import { initSetupScreen, resetSetupScreen, showSetupScreen } from './components/setupScreen.js';
 
 const companyListEl = document.getElementById('company-list');
 const statusRowEl = document.getElementById('status-row');
@@ -48,7 +48,7 @@ async function boot() {
   initTitlebar({
     onMinimize: () => window.tallyAgent.minimize(),
     onClose: () => window.tallyAgent.close(),
-    onMenu: () => { /* native overflow menu — fast-follow */ },
+    onMenu: () => window.tallyAgent.showMenu(),
     onUpdateClick: async () => {
       const state = await window.tallyAgent.getState();
       if (state.updateStatus === 'ready') {
@@ -72,6 +72,17 @@ async function boot() {
       }
       return result;
     },
+  });
+
+  // Logout (title-bar menu or tray): drop the company list and go back to the
+  // key entry screen.
+  window.tallyAgent.onLoggedOut(() => {
+    companyListEl.innerHTML = '';
+    companyListEl.classList.add('hidden');
+    renderEmptyState(false);
+    statusRowEl.classList.add('hidden');
+    resetSetupScreen();
+    showSetupScreen(true);
   });
 
   window.tallyAgent.onStateChanged(renderState);

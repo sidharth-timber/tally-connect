@@ -1,6 +1,8 @@
 const { Tray, Menu, app } = require('electron');
 const path = require('path');
 const { getMainWindow, markQuitting } = require('./window');
+const { performLogout } = require('./logout');
+const { hasCompletedSetup } = require('./firstRun');
 
 let tray = null;
 
@@ -24,6 +26,8 @@ function createTray(engine) {
       { label: 'Refresh Company List', click: () => engine.refresh() },
       { type: 'separator' },
       { label: statusLabel, enabled: false },
+      { type: 'separator' },
+      { label: 'Log out…', enabled: hasCompletedSetup(), click: () => performLogout(engine) },
       { type: 'separator' },
       {
         label: 'Quit Timber TallyAgent',

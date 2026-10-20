@@ -20,6 +20,7 @@ async function submitAgentKey(caKey) {
 
   store.set('caKey', trimmed);
   store.set('hasCompletedSetup', true);
+  store.set('loggedOut', false);
   return { ok: true };
 }
 

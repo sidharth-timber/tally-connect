@@ -291,9 +291,22 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     await start();
   }
 
+  // Forget the Agent Key and stop all background polling. The EventEmitter
+  // survives (tray/IPC stay subscribed), so signing in again via updateAuth
+  // simply restarts the loops.
+  function logout() {
+    stop();
+    companiesById.clear();
+    auth = { ...auth, caKey: '', apiKey: undefined };
+    state.latestVersion = null;
+    state.downloadUrl = null;
+    emitState();
+  }
+
   return {
     start,
     stop,
+    logout,
     refresh,
     syncCompany,
     getState,

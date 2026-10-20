@@ -24,6 +24,12 @@ export function initSetupScreen({ onSubmit }) {
   });
 }
 
+export function resetSetupScreen() {
+  document.getElementById('setup-key-input').value = '';
+  document.getElementById('setup-error').textContent = '';
+  document.getElementById('setup-submit').disabled = false;
+}
+
 export function showSetupScreen(show) {
   document.getElementById('setup-screen').classList.toggle('hidden', !show);
 }

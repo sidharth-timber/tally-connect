@@ -61,7 +61,7 @@ if (!gotLock) {
     // the app shell on a machine that has a real TallyAgent install, so a
     // dev run never auto-imports real credentials and starts syncing against
     // production Tally/backend.
-    if (!hasCompletedSetup() && !TEST_MODE) {
+    if (!hasCompletedSetup() && !TEST_MODE && !store.get('loggedOut')) {
       try {
         const { migrate } = require('../../scripts/migrate-from-service');
         const result = migrate();

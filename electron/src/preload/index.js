@@ -11,6 +11,13 @@ contextBridge.exposeInMainWorld('tallyAgent', {
   },
 
   hasCompletedSetup: () => ipcRenderer.invoke('setup:has-completed'),
+  logout: () => ipcRenderer.invoke('auth:logout'),
+  showMenu: () => ipcRenderer.send('menu:show'),
+  onLoggedOut: (cb) => {
+    const handler = () => cb();
+    ipcRenderer.on('auth:logged-out', handler);
+    return () => ipcRenderer.removeListener('auth:logged-out', handler);
+  },
   submitAgentKey: (key) => ipcRenderer.invoke('setup:submit-key', key),
 
   onUpdateStatus: (cb) => {
