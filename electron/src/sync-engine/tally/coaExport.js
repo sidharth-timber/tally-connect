@@ -1,5 +1,5 @@
 const axios = require('axios');
-const { DEFAULT_TALLY_URL } = require('./tallyClient');
+const { DEFAULT_TALLY_URL, tallyHttp } = require('./tallyClient');
 
 // Chart-of-accounts export via an inline-TDL Collection request. Unlike the
 // REPORTNAME exports (where only Day Book is safe — see tallyClient.js),
@@ -117,7 +117,7 @@ function parseCollectionResponse(xml, objectTag) {
 // company. Throws on transport errors; returns { groups, ledgers }.
 async function fetchCOA({ tallyUrl = DEFAULT_TALLY_URL, tallyCompanyName }) {
   const post = async xml => {
-    const res = await axios.post(tallyUrl, xml, {
+    const res = await tallyHttp.post(tallyUrl, xml, {
       headers: { 'Content-Type': 'application/xml' },
       timeout: 30000,
     });

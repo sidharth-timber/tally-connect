@@ -1,4 +1,5 @@
 const EventEmitter = require('events');
+const logger = require('./logger');
 const { agentInit } = require('./agentInit');
 const { checkTallyStatus, DEFAULT_TALLY_URL } = require('./tally/tallyClient');
 const { createInitialState } = require('./state');
@@ -69,9 +70,11 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     const now = new Date().toISOString();
     const rank = { success: 0, partial: 1, error: 2 };
     const worst = new Map();
+    const failedTotals = new Map();
     for (const results of resultsArrays) {
       for (const r of results) {
         const status = r.error ? 'error' : r.failed > 0 ? 'partial' : 'success';
+        failedTotals.set(r.company_id, (failedTotals.get(r.company_id) || 0) + (r.failed || 0));
         const prev = worst.get(r.company_id);
         if (!prev || rank[status] > rank[prev.status]) {
           worst.set(r.company_id, { status, error: r.error || null });
@@ -84,6 +87,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       company.lastSyncedAt = now;
       company.lastSyncStatus = status;
       company.lastSyncError = error;
+      company.lastSyncFailed = failedTotals.get(companyId) || 0;
     }
   }
 
@@ -226,7 +230,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       emitter.emit('agent-init', { latestVersion, downloadUrl });
       await autoImportCOA();
     } catch (err) {
-      console.error('[sync-engine] agentInit failed:', err.response?.data || err.message);
+      logger.error('[sync-engine] agentInit failed:', err.response?.data || err.message);
     }
     emitState();
   }

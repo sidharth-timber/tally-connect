@@ -2,6 +2,13 @@ const axios = require('axios');
 
 const DEFAULT_TALLY_URL = 'http://localhost:9000';
 
+// Tally Prime's XML server answers only when its UI is idle: a modal dialog
+// open in Tally (or a crash) leaves a request hanging forever, and without a
+// timeout the agent sat on "Syncing…" indefinitely. Every push/export uses
+// this instance so a stall becomes an error after 90 s instead.
+const TALLY_TIMEOUT_MS = 90 * 1000;
+const tallyHttp = axios.create({ timeout: TALLY_TIMEOUT_MS });
+
 // 🔎 Extracts error text from Tally response XML string
 function extractLineError(tallyResponse) {
   const match = tallyResponse.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
@@ -64,6 +71,8 @@ async function checkTallyStatus(tallyUrl = DEFAULT_TALLY_URL) {
 
 module.exports = {
   DEFAULT_TALLY_URL,
+  tallyHttp,
+  TALLY_TIMEOUT_MS,
   extractLineError,
   extractVoucherId,
   fetchTallyCompanies,

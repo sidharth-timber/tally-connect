@@ -1,6 +1,7 @@
 const axios = require('axios');
+const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
 const {
   buildPurchaseAccountXML, buildUnitXML, buildItemXML, buildGSTInputLedgerXML,
   buildVendorLedgerXML, buildPurchaseXML,
@@ -17,17 +18,17 @@ async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
 
   if (!ledgerNames.purchase) {
     try {
-      const res = await axios.post(tallyUrl, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const res = await tallyHttp.post(tallyUrl, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
       const err = extractLineError(res.data);
-      if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Purchase Account ledger:', err);
-    } catch (e) { console.log('⚠️ Purchase Account error:', e.message); }
+      if (err && !err.toLowerCase().includes('already exists')) logger.log('⚠️ Purchase Account ledger:', err);
+    } catch (e) { logger.log('⚠️ Purchase Account error:', e.message); }
   }
 
   try {
-    const res = await axios.post(tallyUrl, buildUnitXML(), { headers: { 'Content-Type': 'application/xml' } });
+    const res = await tallyHttp.post(tallyUrl, buildUnitXML(), { headers: { 'Content-Type': 'application/xml' } });
     const err = extractLineError(res.data);
-    if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Unit PIECES:', err);
-  } catch (e) { console.log('⚠️ Unit PIECES error:', e.message); }
+    if (err && !err.toLowerCase().includes('already exists')) logger.log('⚠️ Unit PIECES:', err);
+  } catch (e) { logger.log('⚠️ Unit PIECES error:', e.message); }
 
   const itemsToCreate = lineItems.length > 0
     ? lineItems.map(i => ({
@@ -40,10 +41,10 @@ async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
   for (const item of itemsToCreate) {
     try {
       const itemXML = buildItemXML(item.name, item.gstRate, item.hsn);
-      const itemRes = await axios.post(tallyUrl, itemXML, { headers: { 'Content-Type': 'application/xml' } });
+      const itemRes = await tallyHttp.post(tallyUrl, itemXML, { headers: { 'Content-Type': 'application/xml' } });
       const err = extractLineError(itemRes.data);
-      if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ Item "${item.name}":`, err);
-    } catch (e) { console.log(`⚠️ Item "${item.name}" error:`, e.message); }
+      if (err && !err.toLowerCase().includes('already exists')) logger.log(`⚠️ Item "${item.name}":`, err);
+    } catch (e) { logger.log(`⚠️ Item "${item.name}" error:`, e.message); }
   }
 
   // Under RCM the voucher never uses CGST/SGST/IGST Input — it posts to the
@@ -55,10 +56,10 @@ async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
     if (bill.igst > 0 && !ledgerNames.input_igst) inputLedgers.push({ name: 'IGST Input', head: 'Integrated Tax' });
     for (const l of inputLedgers) {
       try {
-        const res = await axios.post(tallyUrl, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
+        const res = await tallyHttp.post(tallyUrl, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
         const err = extractLineError(res.data);
-        if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ ${l.name} ledger:`, err);
-      } catch (e) { console.log(`⚠️ ${l.name} error:`, e.message); }
+        if (err && !err.toLowerCase().includes('already exists')) logger.log(`⚠️ ${l.name} ledger:`, err);
+      } catch (e) { logger.log(`⚠️ ${l.name} error:`, e.message); }
     }
   }
 
@@ -87,10 +88,10 @@ async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
   }
 
   try {
-    const res = await axios.post(tallyUrl, buildVendorLedgerXML(vendorName), { headers: { 'Content-Type': 'application/xml' } });
+    const res = await tallyHttp.post(tallyUrl, buildVendorLedgerXML(vendorName), { headers: { 'Content-Type': 'application/xml' } });
     const err = extractLineError(res.data);
-    if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ Vendor ledger "${vendorName}":`, err);
-  } catch (e) { console.log('⚠️ Vendor ledger error:', e.message); }
+    if (err && !err.toLowerCase().includes('already exists')) logger.log(`⚠️ Vendor ledger "${vendorName}":`, err);
+  } catch (e) { logger.log('⚠️ Vendor ledger error:', e.message); }
 }
 
 // Syncs pending vendor bills (purchases) for every company.
@@ -113,7 +114,7 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await ensurePurchaseMasterData(bill, tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, bill.account_create_name, bill.account_create_parent, 'Indirect Expenses');
           const xml = buildPurchaseXML(bill, ledgerNames);
-          const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
+          const tallyRes = await tallyHttp.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
           if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
           const lineError = extractLineError(tallyRes.data);
           if (lineError) throw new Error(`Purchase creation failed: ${lineError}`);
@@ -130,14 +131,14 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'success', error: '', tallyVoucherNumber });
           succeeded++;
         } catch (err) {
-          console.error(`❌ Bill ${bill.id} failed:`, err.message);
+          logger.error(`❌ Bill ${bill.id} failed:`, err.message);
           await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
           failed++;
         }
       }
     } catch (err) {
       loopError = err.response?.data?.message || err.response?.data?.error || err.message;
-      console.error(`❌ Bill loop [${company_id}] error:`, loopError);
+      logger.error(`❌ Bill loop [${company_id}] error:`, loopError);
     }
     results.push({ company_id, succeeded, failed, error: loopError });
   }

@@ -1,4 +1,6 @@
 const axios = require('axios');
+const logger = require('../logger');
+const { tallyHttp } = require('../tally/tallyClient');
 const {
   parseVouchers, parseReceipts, parsePurchases, parsePayments,
   parseCreditNotes, parseDebitNotes,
@@ -41,7 +43,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
     from.setDate(from.getDate() - pullDays);
 
     const xml = buildFetchXML(fmtDate(from), fmtDate(to));
-    const tallyRes = await axios.post(tallyUrl, xml, {
+    const tallyRes = await tallyHttp.post(tallyUrl, xml, {
       headers: { 'Content-Type': 'application/xml' },
       timeout: 10000
     });
@@ -53,7 +55,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-import', data: v
         });
         if (r.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] ${v.voucher_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] ${v.voucher_number} failed:`, e.response?.data?.error || e.message); }
     }
 
     const purchases = parsePurchases(tallyRes.data);
@@ -63,7 +65,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-purchase', data: p
         });
         if (r.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] purchase ${p.voucher_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] purchase ${p.voucher_number} failed:`, e.response?.data?.error || e.message); }
     }
 
     const vendor_payments = parsePayments(tallyRes.data);
@@ -73,7 +75,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-payment', data: p
         });
         if (r.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] payment ${p.payment_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] payment ${p.payment_number} failed:`, e.response?.data?.error || e.message); }
     }
 
     const receipts = parseReceipts(tallyRes.data);
@@ -83,7 +85,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-receipt', data: r
         });
         if (resp.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] receipt ${r.receipt_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] receipt ${r.receipt_number} failed:`, e.response?.data?.error || e.message); }
     }
 
     const creditNotes = parseCreditNotes(tallyRes.data);
@@ -93,7 +95,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-credit-note', data: n
         });
         if (resp.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] credit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] credit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
     }
 
     const debitNotes = parseDebitNotes(tallyRes.data);
@@ -103,11 +105,11 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
           ...authPayload, company_id: companyId, event: 'tally-debit-note', data: n
         });
         if (resp.data.imported) synced_count++;
-      } catch (e) { console.error(`[pull] debit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
+      } catch (e) { logger.error(`[pull] debit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
     }
   } catch (e) {
     pull_error = e.message;
-    console.error('[pull] loop error:', e.message);
+    logger.error('[pull] loop error:', e.message);
   }
 
   if (caKey && credentialId) {
@@ -122,7 +124,7 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
         },
       });
     } catch (e) {
-      console.error('[pull] sync-complete report failed:', e.response?.data?.error || e.message);
+      logger.error('[pull] sync-complete report failed:', e.response?.data?.error || e.message);
     }
   }
 

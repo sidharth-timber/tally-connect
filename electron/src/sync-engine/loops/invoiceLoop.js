@@ -1,6 +1,7 @@
 const axios = require('axios');
+const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
 const {
   buildUnitXML, buildStockGroupXML, buildSalesLedgerXML, buildGSTLedgerXML,
   buildLedgerXML, buildItemXML, buildInvoiceXML,
@@ -17,31 +18,31 @@ const { ensureCustomLedger } = require('./paymentLoop');
 // duplicate.
 async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
   const unitXML = buildUnitXML();
-  const unitRes = await axios.post(tallyUrl, unitXML, { headers: { 'Content-Type': 'application/xml' } });
+  const unitRes = await tallyHttp.post(tallyUrl, unitXML, { headers: { 'Content-Type': 'application/xml' } });
   const unitError = extractLineError(unitRes.data);
   if (unitError && !unitError.toLowerCase().includes('already exists')) {
     throw new Error(`Unit creation failed: ${unitError}`);
   }
 
   try {
-    const stockGroupRes = await axios.post(tallyUrl, buildStockGroupXML(), { headers: { 'Content-Type': 'application/xml' } });
+    const stockGroupRes = await tallyHttp.post(tallyUrl, buildStockGroupXML(), { headers: { 'Content-Type': 'application/xml' } });
     const stockGroupError = extractLineError(stockGroupRes.data);
     if (stockGroupError && !stockGroupError.toLowerCase().includes('already exists')) {
-      console.log("⚠️ Primary stock group creation failed, will try without parent group");
+      logger.log("⚠️ Primary stock group creation failed, will try without parent group");
     }
   } catch (err) {
-    console.log('⚠️ Stock group creation error, will try items without parent group');
+    logger.log('⚠️ Stock group creation error, will try items without parent group');
   }
 
   if (!ledgerNames.sales) {
     try {
-      const salesLedgerRes = await axios.post(tallyUrl, buildSalesLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const salesLedgerRes = await tallyHttp.post(tallyUrl, buildSalesLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
       const salesLedgerError = extractLineError(salesLedgerRes.data);
       if (salesLedgerError && !salesLedgerError.toLowerCase().includes('already exists')) {
-        console.log('⚠️ Sales ledger creation failed:', salesLedgerError);
+        logger.log('⚠️ Sales ledger creation failed:', salesLedgerError);
       }
     } catch (err) {
-      console.log('⚠️ Sales ledger creation error:', err.message);
+      logger.log('⚠️ Sales ledger creation error:', err.message);
     }
   }
 
@@ -52,13 +53,13 @@ async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
   if (invoice.cess > 0 && !ledgerNames.output_cess) gstLedgers.push({ name: 'Cess', head: 'Cess' });
   for (const gst of gstLedgers) {
     try {
-      const gstRes = await axios.post(tallyUrl, buildGSTLedgerXML(gst.name, gst.head), { headers: { 'Content-Type': 'application/xml' } });
+      const gstRes = await tallyHttp.post(tallyUrl, buildGSTLedgerXML(gst.name, gst.head), { headers: { 'Content-Type': 'application/xml' } });
       const gstError = extractLineError(gstRes.data);
       if (gstError && !gstError.toLowerCase().includes('already exists')) {
-        console.log(`⚠️ ${gst.name} ledger creation failed:`, gstError);
+        logger.log(`⚠️ ${gst.name} ledger creation failed:`, gstError);
       }
     } catch (err) {
-      console.log(`⚠️ ${gst.name} ledger creation error:`, err.message);
+      logger.log(`⚠️ ${gst.name} ledger creation error:`, err.message);
     }
   }
 
@@ -71,7 +72,7 @@ async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
   }
 
   const customerName = invoice.customer?.name || invoice.customerName || 'Unknown Customer';
-  const ledgerRes = await axios.post(tallyUrl, buildLedgerXML(customerName, invoice.customer), { headers: { 'Content-Type': 'application/xml' } });
+  const ledgerRes = await tallyHttp.post(tallyUrl, buildLedgerXML(customerName, invoice.customer), { headers: { 'Content-Type': 'application/xml' } });
   const ledgerError = extractLineError(ledgerRes.data);
   if (ledgerError && !ledgerError.toLowerCase().includes('already exists')) {
     throw new Error(`Customer creation failed: ${ledgerError}`);
@@ -80,7 +81,7 @@ async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
   for (const item of invoice.items) {
     const itemName = item.title || item.name || 'Unknown Item';
     const itemXML = buildItemXML(itemName, item.gst_rate || 0, item.hsn || '');
-    const itemRes = await axios.post(tallyUrl, itemXML, { headers: { 'Content-Type': 'application/xml' } });
+    const itemRes = await tallyHttp.post(tallyUrl, itemXML, { headers: { 'Content-Type': 'application/xml' } });
 
     const itemError = extractLineError(itemRes.data);
     if (itemError && itemError.toLowerCase().includes('already exists')) {
@@ -88,7 +89,7 @@ async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
         `<STOCKITEM NAME="${itemName}" RESERVEDNAME="">`,
         `<STOCKITEM NAME="${itemName}" RESERVEDNAME="" ACTION="Alter">`
       );
-      const alterRes = await axios.post(tallyUrl, alterXML, { headers: { 'Content-Type': 'application/xml' } });
+      const alterRes = await tallyHttp.post(tallyUrl, alterXML, { headers: { 'Content-Type': 'application/xml' } });
       const alterError = extractLineError(alterRes.data);
       if (alterError) throw new Error(`Item alter failed: ${alterError}`);
     } else if (itemError) {
@@ -120,7 +121,7 @@ async function invoiceLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await ensureCustomLedger(tallyUrl, invoice.account_create_name, invoice.account_create_parent, 'Sales Accounts');
 
           const xml = buildInvoiceXML(invoice, { gstin, state, ledgerNames });
-          const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
+          const tallyRes = await tallyHttp.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
 
           if (tallyRes.data.includes('Unknown Request')) {
             throw new Error('Tally rejected the request: Unknown Request — check XML structure or ensure a company is open in Tally Prime');
@@ -148,14 +149,14 @@ async function invoiceLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await reportSyncStatus(auth, 'sync-status', company_id, { invoiceId: invoice.id, status: 'success', error: '', tallyVoucherNumber });
           succeeded++;
         } catch (err) {
-          console.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);
+          logger.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);
           await reportSyncStatus(auth, 'sync-status', company_id, { invoiceId: invoice.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
           failed++;
         }
       }
     } catch (err) {
       loopError = err.response?.data?.message || err.message;
-      console.error(`❌ Invoice loop [${company_id}] error:`, loopError);
+      logger.error(`❌ Invoice loop [${company_id}] error:`, loopError);
     }
     results.push({ company_id, succeeded, failed, error: loopError });
   }

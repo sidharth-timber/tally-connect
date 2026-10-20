@@ -1,4 +1,5 @@
 const axios = require('axios');
+const logger = require('./logger');
 
 // Generic replacement for agent.js's five near-identical reportXxxStatus functions.
 // `auth` is { serverUrl, caKey } or { serverUrl, apiKey }.
@@ -11,7 +12,7 @@ async function reportSyncStatus(auth, event, companyId, data) {
       data,
     });
   } catch (err) {
-    console.error(`❌ Failed to report ${event}:`, err.message);
+    logger.error(`❌ Failed to report ${event}:`, err.message);
   }
 }
 

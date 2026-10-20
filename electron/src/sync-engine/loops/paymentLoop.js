@@ -1,6 +1,7 @@
 const axios = require('axios');
+const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
 const { buildReceiptXML, buildCustomLedgerXML } = require('../tally/xmlBuilders');
 const { fetchTallyReceiptNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
@@ -22,10 +23,10 @@ async function ensureCustomLedger(tallyUrl, name, parentName, fallbackParent) {
     );
     const err = extractLineError(res.data);
     if (err && !err.toLowerCase().includes('already exists')) {
-      console.log(`⚠️ Ledger "${name}" creation failed:`, err);
+      logger.log(`⚠️ Ledger "${name}" creation failed:`, err);
     }
   } catch (e) {
-    console.log(`⚠️ Ledger "${name}" creation error:`, e.message);
+    logger.log(`⚠️ Ledger "${name}" creation error:`, e.message);
   }
 }
 
@@ -51,13 +52,13 @@ async function ensureCashLedger(tallyUrl, ledgerNames = {}) {
       .up()
     .end({ prettyPrint: true });
   try {
-    const res = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
+    const res = await tallyHttp.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
     const err = extractLineError(res.data);
     if (err && !err.toLowerCase().includes('already exists')) {
-      console.log('⚠️ Cash ledger creation failed:', err);
+      logger.log('⚠️ Cash ledger creation failed:', err);
     }
   } catch (e) {
-    console.log('⚠️ Cash ledger creation error:', e.message);
+    logger.log('⚠️ Cash ledger creation error:', e.message);
   }
 }
 
@@ -82,7 +83,7 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await ensureCashLedger(tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, p.account_create_name, p.account_create_parent, 'Bank Accounts');
           const xml = buildReceiptXML(p, ledgerNames);
-          const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
+          const tallyRes = await tallyHttp.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
 
           if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected receipt: Unknown Request');
           const lineError = extractLineError(tallyRes.data);
@@ -102,14 +103,14 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'success', error: '', receiptNumber });
           succeeded++;
         } catch (err) {
-          console.error(`❌ Payment ${p.id} failed:`, err.message);
+          logger.error(`❌ Payment ${p.id} failed:`, err.message);
           await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'error', error: describeError(err), receiptNumber: null });
           failed++;
         }
       }
     } catch (err) {
       loopError = err.response?.data?.message || err.message;
-      console.error(`❌ Payment loop [${company_id}] error:`, loopError);
+      logger.error(`❌ Payment loop [${company_id}] error:`, loopError);
     }
     results.push({ company_id, succeeded, failed, error: loopError });
   }

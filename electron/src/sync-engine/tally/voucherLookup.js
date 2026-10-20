@@ -1,5 +1,6 @@
 const axios = require('axios');
-const { DEFAULT_TALLY_URL } = require('./tallyClient');
+const logger = require('../logger');
+const { DEFAULT_TALLY_URL, tallyHttp } = require('./tallyClient');
 
 function dayBookRangeXML(dateStr) {
   return `<?xml version="1.0"?>
@@ -44,7 +45,7 @@ function unescapeXml(str) {
 
 async function fetchTallyVoucherNumber(dateStr, partyName, total, tallyUrl = DEFAULT_TALLY_URL) {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), {
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), {
       headers: { 'Content-Type': 'application/xml' },
       timeout: 10000
     });
@@ -68,14 +69,14 @@ async function fetchTallyVoucherNumber(dateStr, partyName, total, tallyUrl = DEF
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyVoucherNumber error:', e.message);
+    logger.error('[sync-engine] fetchTallyVoucherNumber error:', e.message);
   }
   return null;
 }
 
 async function fetchTallyPurchaseVoucherNumber(dateStr, vendorName, total, tallyUrl = DEFAULT_TALLY_URL) {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
       .filter(([, body]) => /<VOUCHERTYPENAME>\s*Purchase\s*<\/VOUCHERTYPENAME>/i.test(body));
     for (const [, body] of blocks) {
@@ -95,14 +96,14 @@ async function fetchTallyPurchaseVoucherNumber(dateStr, vendorName, total, tally
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyPurchaseVoucherNumber error:', e.message);
+    logger.error('[sync-engine] fetchTallyPurchaseVoucherNumber error:', e.message);
   }
   return null;
 }
 
 async function fetchTallyReceiptNumber(dateStr, partyName, amount, tallyUrl = DEFAULT_TALLY_URL) {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), {
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), {
       headers: { 'Content-Type': 'application/xml' },
       timeout: 10000
     });
@@ -117,14 +118,14 @@ async function fetchTallyReceiptNumber(dateStr, partyName, amount, tallyUrl = DE
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyReceiptNumber error:', e.message);
+    logger.error('[sync-engine] fetchTallyReceiptNumber error:', e.message);
   }
   return null;
 }
 
 async function fetchTallyPaymentNumber(dateStr, vendorName, amount, tallyUrl = DEFAULT_TALLY_URL) {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
       .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
     for (const [, body] of blocks) {
@@ -134,7 +135,7 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount, tallyUrl = D
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyPaymentNumber error:', e.message);
+    logger.error('[sync-engine] fetchTallyPaymentNumber error:', e.message);
   }
   return null;
 }
@@ -144,7 +145,7 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount, tallyUrl = D
 // type names contain a space, so the filter regex allows flexible whitespace.
 async function fetchTallyNoteVoucherNumber(vchType, dateStr, partyName, total, tallyUrl = DEFAULT_TALLY_URL) {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const typeRe = new RegExp(`<VOUCHERTYPENAME>\\s*${vchType.replace(/ /g, '\\s+')}\\s*</VOUCHERTYPENAME>`, 'i');
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
       .filter(([, body]) => typeRe.test(body));
@@ -165,7 +166,7 @@ async function fetchTallyNoteVoucherNumber(vchType, dateStr, partyName, total, t
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error(`[sync-engine] fetchTallyNoteVoucherNumber(${vchType}) error:`, e.message);
+    logger.error(`[sync-engine] fetchTallyNoteVoucherNumber(${vchType}) error:`, e.message);
   }
   return null;
 }
@@ -175,7 +176,7 @@ async function fetchTallyNoteVoucherNumber(vchType, dateStr, partyName, total, t
 // alone also matches unrelated Payment vouchers of equal value.
 async function fetchTallyExpenseVoucherNumber(dateStr, amounts, tallyUrl = DEFAULT_TALLY_URL, narration = '') {
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
       .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
     const wantNarration = String(narration || '').trim().toLowerCase();
@@ -185,7 +186,7 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amounts, tallyUrl = DEFAU
       if (anyEntryAmountMatches(body, amounts)) return get('VOUCHERNUMBER');
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyExpenseVoucherNumber error:', e.message);
+    logger.error('[sync-engine] fetchTallyExpenseVoucherNumber error:', e.message);
   }
   return null;
 }
@@ -196,7 +197,7 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amounts, tallyUrl = DEFAU
 async function fetchTallyVoucherNumberById(dateStr, voucherId, tallyUrl = DEFAULT_TALLY_URL) {
   if (!voucherId) return null;
   try {
-    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)];
     for (const [, body] of blocks) {
       const id = (body.match(/<MASTERID>\s*(\d+)\s*<\/MASTERID>/) || [])[1];
@@ -206,7 +207,7 @@ async function fetchTallyVoucherNumberById(dateStr, voucherId, tallyUrl = DEFAUL
       }
     }
   } catch (e) {
-    console.error('[sync-engine] fetchTallyVoucherNumberById error:', e.message);
+    logger.error('[sync-engine] fetchTallyVoucherNumberById error:', e.message);
   }
   return null;
 }

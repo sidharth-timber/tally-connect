@@ -1,4 +1,5 @@
 const axios = require('axios');
+const logger = require('../logger');
 const { fetchCOA } = require('../tally/coaExport');
 
 // Exports the chart of accounts (group + ledger masters) from Tally for one
@@ -25,7 +26,7 @@ async function fetchAndPushCOA({ serverUrl, caKey, apiKey, tallyUrl, company, tr
     return { company_id: company.company_id, succeeded: ledgers.length, failed: 0, error: null };
   } catch (e) {
     const msg = e.response?.data?.error || e.message;
-    console.error(`[coa] import for company ${company.company_id} failed:`, msg);
+    logger.error(`[coa] import for company ${company.company_id} failed:`, msg);
     return { company_id: company.company_id, succeeded: 0, failed: 1, error: msg };
   }
 }

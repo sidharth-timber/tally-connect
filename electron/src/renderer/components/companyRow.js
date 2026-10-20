@@ -56,12 +56,19 @@ export function renderCompanyRow(company, { onWebView, onSync }) {
     ? { text: 'Syncing…', cls: 'ok' }
     : company.lastSyncStatus === 'error'
       ? { text: 'Sync failed', cls: 'error' }
-      : formatRelativeSync(company.lastSyncedAt);
+      : company.lastSyncStatus === 'partial'
+        ? { text: 'Synced with errors', cls: 'error' }
+        : formatRelativeSync(company.lastSyncedAt);
 
   const syncTime = document.createElement('span');
   syncTime.className = `sync-time ${syncStatus.cls}`;
   syncTime.textContent = syncStatus.text;
-  if (company.lastSyncError) syncTime.title = company.lastSyncError;
+  if (company.lastSyncError) {
+    syncTime.title = company.lastSyncError;
+  } else if (company.lastSyncStatus === 'partial') {
+    const n = company.lastSyncFailed || 0;
+    syncTime.title = (n ? n + ' document(s)' : 'Some documents') + ' failed to sync. Open Timber to see the error on each one.';
+  }
 
   side.appendChild(syncBtn);
   side.appendChild(webViewBtn);
