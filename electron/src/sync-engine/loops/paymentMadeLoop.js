@@ -3,7 +3,7 @@ const { extractLineError } = require('../tally/tallyClient');
 const { buildPaymentVoucherXML } = require('../tally/xmlBuilders');
 const { fetchTallyPaymentNumber } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
-const { ensureCashLedger } = require('./paymentLoop');
+const { ensureCashLedger, ensureCustomLedger } = require('./paymentLoop');
 
 // Syncs pending vendor payments (payments made) for every company.
 async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
@@ -19,10 +19,15 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
         event: 'payment-made-sync-request'
       });
       const payments = res.data.payments || [];
+      const ledgerNames = res.data.ledger_names || {};
       for (const p of payments) {
         try {
-          await ensureCashLedger(tallyUrl);
-          const xml = buildPaymentVoucherXML(p);
+          await ensureCashLedger(tallyUrl, ledgerNames);
+          await ensureCustomLedger(tallyUrl, p.account_create_name, p.account_create_parent, 'Bank Accounts');
+          if (p.tds_amount > 0 && !ledgerNames.tds_payable) {
+            await ensureCustomLedger(tallyUrl, 'TDS Payable', null, 'Duties & Taxes');
+          }
+          const xml = buildPaymentVoucherXML(p, ledgerNames);
           const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
           if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
           const lineError = extractLineError(tallyRes.data);

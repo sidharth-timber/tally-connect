@@ -6,9 +6,15 @@ const {
 } = require('../tally/xmlBuilders');
 const { fetchTallyVoucherNumber } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
+const { ensureCustomLedger } = require('./paymentLoop');
 
 // 🛠 Ensures master data exists: Unit + Stock Group + Customer Ledger + Items + Sales Ledger + GST ledgers
-async function ensureMasterData(invoice, tallyUrl) {
+// `ledgerNames` (Phase 2, optional): when a role (sales/output_cgst/etc.) is
+// already mapped to a real Tally ledger via the CA's COA mapping, that ledger
+// already exists in Tally — skip creating the generic default under that
+// role to avoid cluttering the client's chart of accounts with an unused
+// duplicate.
+async function ensureMasterData(invoice, tallyUrl, ledgerNames = {}) {
   const unitXML = buildUnitXML();
   const unitRes = await axios.post(tallyUrl, unitXML, { headers: { 'Content-Type': 'application/xml' } });
   const unitError = extractLineError(unitRes.data);
@@ -26,20 +32,23 @@ async function ensureMasterData(invoice, tallyUrl) {
     console.log('⚠️ Stock group creation error, will try items without parent group');
   }
 
-  try {
-    const salesLedgerRes = await axios.post(tallyUrl, buildSalesLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
-    const salesLedgerError = extractLineError(salesLedgerRes.data);
-    if (salesLedgerError && !salesLedgerError.toLowerCase().includes('already exists')) {
-      console.log('⚠️ Sales ledger creation failed:', salesLedgerError);
+  if (!ledgerNames.sales) {
+    try {
+      const salesLedgerRes = await axios.post(tallyUrl, buildSalesLedgerXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const salesLedgerError = extractLineError(salesLedgerRes.data);
+      if (salesLedgerError && !salesLedgerError.toLowerCase().includes('already exists')) {
+        console.log('⚠️ Sales ledger creation failed:', salesLedgerError);
+      }
+    } catch (err) {
+      console.log('⚠️ Sales ledger creation error:', err.message);
     }
-  } catch (err) {
-    console.log('⚠️ Sales ledger creation error:', err.message);
   }
 
   const gstLedgers = [];
-  if (invoice.cgst > 0) gstLedgers.push({ name: 'CGST', head: 'Central Tax' });
-  if (invoice.sgst > 0) gstLedgers.push({ name: 'SGST', head: 'State Tax' });
-  if (invoice.igst > 0) gstLedgers.push({ name: 'IGST', head: 'Integrated Tax' });
+  if (invoice.cgst > 0 && !ledgerNames.output_cgst) gstLedgers.push({ name: 'CGST', head: 'Central Tax' });
+  if (invoice.sgst > 0 && !ledgerNames.output_sgst) gstLedgers.push({ name: 'SGST', head: 'State Tax' });
+  if (invoice.igst > 0 && !ledgerNames.output_igst) gstLedgers.push({ name: 'IGST', head: 'Integrated Tax' });
+  if (invoice.cess > 0 && !ledgerNames.output_cess) gstLedgers.push({ name: 'Cess', head: 'Cess' });
   for (const gst of gstLedgers) {
     try {
       const gstRes = await axios.post(tallyUrl, buildGSTLedgerXML(gst.name, gst.head), { headers: { 'Content-Type': 'application/xml' } });
@@ -52,8 +61,16 @@ async function ensureMasterData(invoice, tallyUrl) {
     }
   }
 
+  // Discount / round-off ledgers sit under Indirect Expenses unless the CA mapped them.
+  if (invoice.discount_amount > 0 && !ledgerNames.discount) {
+    await ensureCustomLedger(tallyUrl, 'Discount Allowed', null, 'Indirect Expenses');
+  }
+  if (invoice.round_off && !ledgerNames.round_off) {
+    await ensureCustomLedger(tallyUrl, 'Round Off', null, 'Indirect Expenses');
+  }
+
   const customerName = invoice.customer?.name || invoice.customerName || 'Unknown Customer';
-  const ledgerRes = await axios.post(tallyUrl, buildLedgerXML(customerName), { headers: { 'Content-Type': 'application/xml' } });
+  const ledgerRes = await axios.post(tallyUrl, buildLedgerXML(customerName, invoice.customer), { headers: { 'Content-Type': 'application/xml' } });
   const ledgerError = extractLineError(ledgerRes.data);
   if (ledgerError && !ledgerError.toLowerCase().includes('already exists')) {
     throw new Error(`Customer creation failed: ${ledgerError}`);
@@ -95,11 +112,13 @@ async function invoiceLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
       });
 
       const invoices = res.data.invoices || [];
+      const ledgerNames = res.data.ledger_names || {};
       for (const invoice of invoices) {
         try {
-          await ensureMasterData(invoice, tallyUrl);
+          await ensureMasterData(invoice, tallyUrl, ledgerNames);
+          await ensureCustomLedger(tallyUrl, invoice.account_create_name, invoice.account_create_parent, 'Sales Accounts');
 
-          const xml = buildInvoiceXML(invoice, { gstin, state });
+          const xml = buildInvoiceXML(invoice, { gstin, state, ledgerNames });
           const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
 
           if (tallyRes.data.includes('Unknown Request')) {

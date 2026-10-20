@@ -20,3 +20,12 @@
   File "/oname=$PLUGINSDIR\migrate-service.bat" "${BUILD_RESOURCES_DIR}\migrate-service.bat"
   ExecWait '"$SYSDIR\cmd.exe" /c "$PLUGINSDIR\migrate-service.bat"'
 !macroend
+
+; Wipe the app's userData (Agent Key, setup flag, caches) on a real uninstall
+; only. ${isUpdated} is true when the uninstaller runs as part of an update
+; (auto-update reinstall) — the key must survive that, so skip the wipe.
+!macro customUnInstall
+  ${ifNot} ${isUpdated}
+    RMDir /r "$APPDATA\Timber TallyAgent"
+  ${endIf}
+!macroend

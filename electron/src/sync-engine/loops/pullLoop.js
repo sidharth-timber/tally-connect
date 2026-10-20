@@ -1,5 +1,8 @@
 const axios = require('axios');
-const { parseVouchers, parseReceipts, parsePurchases, parsePayments } = require('../tally/dayBookParser');
+const {
+  parseVouchers, parseReceipts, parsePurchases, parsePayments,
+  parseCreditNotes, parseDebitNotes,
+} = require('../tally/dayBookParser');
 
 function fmtDate(d) {
   return d.toISOString().slice(0, 10).replace(/-/g, '');
@@ -81,6 +84,26 @@ async function pullOnce({ serverUrl, caKey, apiKey, companyId, credentialId, tal
         });
         if (resp.data.imported) synced_count++;
       } catch (e) { console.error(`[pull] receipt ${r.receipt_number} failed:`, e.response?.data?.error || e.message); }
+    }
+
+    const creditNotes = parseCreditNotes(tallyRes.data);
+    for (const n of creditNotes) {
+      try {
+        const resp = await axios.post(`${serverUrl}/webhook`, {
+          ...authPayload, company_id: companyId, event: 'tally-credit-note', data: n
+        });
+        if (resp.data.imported) synced_count++;
+      } catch (e) { console.error(`[pull] credit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
+    }
+
+    const debitNotes = parseDebitNotes(tallyRes.data);
+    for (const n of debitNotes) {
+      try {
+        const resp = await axios.post(`${serverUrl}/webhook`, {
+          ...authPayload, company_id: companyId, event: 'tally-debit-note', data: n
+        });
+        if (resp.data.imported) synced_count++;
+      } catch (e) { console.error(`[pull] debit note ${n.voucher_number} failed:`, e.response?.data?.error || e.message); }
     }
   } catch (e) {
     pull_error = e.message;

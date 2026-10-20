@@ -7,10 +7,16 @@ const { paymentLoop } = require('./loops/paymentLoop');
 const { billLoop } = require('./loops/billLoop');
 const { paymentMadeLoop } = require('./loops/paymentMadeLoop');
 const { expenseLoop } = require('./loops/expenseLoop');
+const { creditNoteLoop, debitNoteLoop } = require('./loops/noteLoop');
 const { pullLoop } = require('./loops/pullLoop');
+const { coaLoop, fetchAndPushCOA } = require('./loops/coaLoop');
 
 const AGENT_INIT_INTERVAL_MS = 5 * 60 * 1000;
 const STATUS_CHECK_INTERVAL_MS = 60 * 1000;
+// Backend clears coa_refresh_requested / flips coa_mapping_status when a COA
+// import lands, but its state can lag one agent-init poll — don't re-post the
+// same snapshot within this window.
+const COA_AUTO_IMPORT_COOLDOWN_MS = 2 * 60 * 1000;
 
 // Backend only knows 'never_synced' | 'success' | 'error' (from
 // tallyClientConfig.last_sync_status, driven by the pull loop's
@@ -42,6 +48,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
   const emitter = new EventEmitter();
   const state = createInitialState(agentVersion);
   const companiesById = new Map();
+  const coaImportedAt = new Map(); // company_id -> epoch ms of last auto COA import
   let timers = [];
   let auth = { serverUrl, caKey, apiKey };
 
@@ -82,12 +89,57 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
   // syncCompany), never on a timer — see the "not automatic" note on start().
   async function runSyncCycle(companies) {
     if (companies.length === 0) return;
-    const ctx = { ...loopCtx(), companies };
-    const resultsArrays = await Promise.all([
-      invoiceLoop(ctx), paymentLoop(ctx), billLoop(ctx),
-      paymentMadeLoop(ctx), expenseLoop(ctx), pullLoop(ctx),
-    ]);
+    // COA snapshot first, so ledgers created in Tally since the last sync are
+    // known to the backend before vouchers referencing them arrive.
+    await coaLoop({ ...loopCtx(), companies }, 'manual');
+    for (const c of companies) coaImportedAt.set(c.company_id, Date.now());
+    // Data loops only for sync-enabled companies — the backend lists
+    // configured-but-disabled companies solely for the COA import (their
+    // mapping must be confirmed before sync can be enabled) and rejects
+    // voucher events for them.
+    const enabled = companies.filter(c => c.sync_enabled !== false);
+    if (enabled.length === 0) return;
+    const ctx = { ...loopCtx(), companies: enabled };
+    // SEQUENTIAL, not Promise.all: Tally Prime's XML server is single-
+    // threaded and crashes outright (Software Exception c0000005) when
+    // several imports land simultaneously — eight concurrent loops made that
+    // near-certain. Serializing costs little (Tally was the bottleneck
+    // anyway) and buys correct ordering for free: documents push before the
+    // notes/payments that reference them, and pullLoop reads the Day Book
+    // last, after everything this cycle pushed is already in it.
+    const resultsArrays = [];
+    for (const loop of [
+      invoiceLoop, paymentLoop, billLoop,
+      paymentMadeLoop, expenseLoop,
+      creditNoteLoop, debitNoteLoop, pullLoop,
+    ]) {
+      resultsArrays.push(await loop(ctx));
+    }
     applyLoopResults(resultsArrays);
+  }
+
+  // First-connect / on-demand COA import: agent-init tells us which companies
+  // have never had their chart of accounts imported (or have a pending
+  // refresh request from the CA's matching page) — push a snapshot without
+  // waiting for a manual sync click. Read-only towards Tally, so it's safe to
+  // run from the automatic agent-init cycle.
+  async function autoImportCOA() {
+    const now = Date.now();
+    const due = [...companiesById.values()].filter(c =>
+      c.tally_company_name &&
+      (c.coa_mapping_status === 'not_imported' || c.coa_refresh_requested) &&
+      now - (coaImportedAt.get(c.company_id) || 0) > COA_AUTO_IMPORT_COOLDOWN_MS
+    );
+    for (const company of due) {
+      coaImportedAt.set(company.company_id, Date.now());
+      const result = await fetchAndPushCOA({ ...loopCtx(), company, trigger: 'auto' });
+      if (!result.error) {
+        // Optimistic local update so the next poll's stale response (if the
+        // backend lags) doesn't retrigger; the backend remains authoritative.
+        company.coa_refresh_requested = false;
+        if (company.coa_mapping_status === 'not_imported') company.coa_mapping_status = 'needs_review';
+      }
+    }
   }
 
   // Triggered only by the renderer's per-company "Sync" button — the sole
@@ -150,6 +202,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
         state.updateStatus = isNewerVersion(latestVersion, agentVersion) ? 'available' : 'idle';
       }
       emitter.emit('agent-init', { latestVersion, downloadUrl });
+      await autoImportCOA();
     } catch (err) {
       console.error('[sync-engine] agentInit failed:', err.response?.data || err.message);
     }

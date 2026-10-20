@@ -6,16 +6,21 @@ const {
 } = require('../tally/xmlBuilders');
 const { fetchTallyPurchaseVoucherNumber } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
+const { ensureCustomLedger } = require('./paymentLoop');
 
-async function ensurePurchaseMasterData(bill, tallyUrl) {
+// `ledgerNames` (Phase 2, optional) — see invoiceLoop.js's ensureMasterData
+// for why a mapped role skips the corresponding default-ledger creation.
+async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
   const vendorName = bill.vendor_name || 'Unknown Vendor';
   const lineItems = (bill.line_items || []).filter(i => i.qty > 0 || i.amount > 0);
 
-  try {
-    const res = await axios.post(tallyUrl, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
-    const err = extractLineError(res.data);
-    if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Purchase Account ledger:', err);
-  } catch (e) { console.log('⚠️ Purchase Account error:', e.message); }
+  if (!ledgerNames.purchase) {
+    try {
+      const res = await axios.post(tallyUrl, buildPurchaseAccountXML(), { headers: { 'Content-Type': 'application/xml' } });
+      const err = extractLineError(res.data);
+      if (err && !err.toLowerCase().includes('already exists')) console.log('⚠️ Purchase Account ledger:', err);
+    } catch (e) { console.log('⚠️ Purchase Account error:', e.message); }
+  }
 
   try {
     const res = await axios.post(tallyUrl, buildUnitXML(), { headers: { 'Content-Type': 'application/xml' } });
@@ -40,16 +45,44 @@ async function ensurePurchaseMasterData(bill, tallyUrl) {
     } catch (e) { console.log(`⚠️ Item "${item.name}" error:`, e.message); }
   }
 
-  const inputLedgers = [];
-  if (bill.cgst > 0) inputLedgers.push({ name: 'CGST Input', head: 'Central Tax' });
-  if (bill.sgst > 0) inputLedgers.push({ name: 'SGST Input', head: 'State Tax' });
-  if (bill.igst > 0) inputLedgers.push({ name: 'IGST Input', head: 'Integrated Tax' });
-  for (const l of inputLedgers) {
-    try {
-      const res = await axios.post(tallyUrl, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
-      const err = extractLineError(res.data);
-      if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ ${l.name} ledger:`, err);
-    } catch (e) { console.log(`⚠️ ${l.name} error:`, e.message); }
+  // Under RCM the voucher never uses CGST/SGST/IGST Input — it posts to the
+  // RCM Payable/"not due" ledgers instead (see the block below).
+  if (!bill.rcm) {
+    const inputLedgers = [];
+    if (bill.cgst > 0 && !ledgerNames.input_cgst) inputLedgers.push({ name: 'CGST Input', head: 'Central Tax' });
+    if (bill.sgst > 0 && !ledgerNames.input_sgst) inputLedgers.push({ name: 'SGST Input', head: 'State Tax' });
+    if (bill.igst > 0 && !ledgerNames.input_igst) inputLedgers.push({ name: 'IGST Input', head: 'Integrated Tax' });
+    for (const l of inputLedgers) {
+      try {
+        const res = await axios.post(tallyUrl, buildGSTInputLedgerXML(l.name, l.head), { headers: { 'Content-Type': 'application/xml' } });
+        const err = extractLineError(res.data);
+        if (err && !err.toLowerCase().includes('already exists')) console.log(`⚠️ ${l.name} ledger:`, err);
+      } catch (e) { console.log(`⚠️ ${l.name} error:`, e.message); }
+    }
+  }
+
+  // RCM Payable (liability) ledgers, plus the "not due" holding account when
+  // the tax will eventually become claimable. Skipped per-role when already
+  // mapped to a real Tally ledger — same pattern as the input-ledger block.
+  // Parent is 'Duties & Taxes' (a real Tally built-in group, same as the
+  // Input CGST/SGST/IGST ledgers above) rather than Timber's own COA
+  // sub-group "RCM GST Payable" — that grouping only exists in Timber's
+  // chart of accounts, not as an actual Tally group, so creating a ledger
+  // under it fails with "Group 'RCM GST Payable' does not exist!".
+  if (bill.rcm) {
+    if (bill.cgst > 0 && !ledgerNames.rcm_cgst_payable) {
+      await ensureCustomLedger(tallyUrl, 'RCM CGST Payable', null, 'Duties & Taxes');
+    }
+    if (bill.sgst > 0 && !ledgerNames.rcm_sgst_payable) {
+      await ensureCustomLedger(tallyUrl, 'RCM SGST Payable', null, 'Duties & Taxes');
+    }
+    if (bill.igst > 0 && !ledgerNames.rcm_igst_payable) {
+      await ensureCustomLedger(tallyUrl, 'RCM IGST Payable', null, 'Duties & Taxes');
+    }
+    const hasRcmTax = bill.cgst > 0 || bill.sgst > 0 || bill.igst > 0;
+    if (bill.itc_eligible !== false && hasRcmTax && !ledgerNames.rcm_itc_not_due) {
+      await ensureCustomLedger(tallyUrl, 'Reverse Charge Tax Input but not due', null, 'Sundry Debtors');
+    }
   }
 
   try {
@@ -73,10 +106,12 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         event: 'bill-sync-request'
       });
       const bills = res.data.bills || [];
+      const ledgerNames = res.data.ledger_names || {};
       for (const bill of bills) {
         try {
-          await ensurePurchaseMasterData(bill, tallyUrl);
-          const xml = buildPurchaseXML(bill);
+          await ensurePurchaseMasterData(bill, tallyUrl, ledgerNames);
+          await ensureCustomLedger(tallyUrl, bill.account_create_name, bill.account_create_parent, 'Indirect Expenses');
+          const xml = buildPurchaseXML(bill, ledgerNames);
           const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
           if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected: Unknown Request');
           const lineError = extractLineError(tallyRes.data);

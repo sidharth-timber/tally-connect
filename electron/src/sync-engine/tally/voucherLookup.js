@@ -132,6 +132,37 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount, tallyUrl = D
   return null;
 }
 
+// Shared by credit and debit notes — same scan as
+// fetchTallyPurchaseVoucherNumber, parameterized on the voucher type. The
+// type names contain a space, so the filter regex allows flexible whitespace.
+async function fetchTallyNoteVoucherNumber(vchType, dateStr, partyName, total, tallyUrl = DEFAULT_TALLY_URL) {
+  try {
+    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const typeRe = new RegExp(`<VOUCHERTYPENAME>\\s*${vchType.replace(/ /g, '\\s+')}\\s*</VOUCHERTYPENAME>`, 'i');
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
+      .filter(([, body]) => typeRe.test(body));
+    for (const [, body] of blocks) {
+      const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
+      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
+      if (name.toLowerCase() !== partyName.toLowerCase()) continue;
+      const ledgerBodies = [
+        ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
+        ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
+      ];
+      const amountMatched = ledgerBodies.some(b => {
+        const amtMatch = b.match(/<AMOUNT>(.*?)<\/AMOUNT>/);
+        const amt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
+        return amt !== null && Math.abs(amt - total) <= 1;
+      });
+      if (!amountMatched) continue;
+      return get('VOUCHERNUMBER');
+    }
+  } catch (e) {
+    console.error(`[sync-engine] fetchTallyNoteVoucherNumber(${vchType}) error:`, e.message);
+  }
+  return null;
+}
+
 async function fetchTallyExpenseVoucherNumber(dateStr, amount, tallyUrl = DEFAULT_TALLY_URL) {
   try {
     const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
@@ -161,5 +192,6 @@ module.exports = {
   fetchTallyPurchaseVoucherNumber,
   fetchTallyReceiptNumber,
   fetchTallyPaymentNumber,
+  fetchTallyNoteVoucherNumber,
   fetchTallyExpenseVoucherNumber,
 };

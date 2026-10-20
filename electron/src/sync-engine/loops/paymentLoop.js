@@ -1,10 +1,40 @@
 const axios = require('axios');
 const { extractLineError } = require('../tally/tallyClient');
-const { buildReceiptXML } = require('../tally/xmlBuilders');
+const { buildReceiptXML, buildCustomLedgerXML } = require('../tally/xmlBuilders');
 const { fetchTallyReceiptNumber } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 
-async function ensureCashLedger(tallyUrl) {
+// Create-fallback (Phase 2c): creates a ledger under an arbitrary name/parent
+// for a Timber account with no Tally mapping yet, instead of silently posting
+// to an unrelated default. Tolerates "already exists" like every other
+// master-ensure call here; never alters an existing ledger. `name` may be
+// undefined (nothing to create) — a plain no-op in that case.
+async function ensureCustomLedger(tallyUrl, name, parentName, fallbackParent) {
+  if (!name) {
+    return;
+  }
+  try {
+    const res = await axios.post(
+      tallyUrl,
+      buildCustomLedgerXML(name, parentName, fallbackParent),
+      { headers: { 'Content-Type': 'application/xml' } }
+    );
+    const err = extractLineError(res.data);
+    if (err && !err.toLowerCase().includes('already exists')) {
+      console.log(`⚠️ Ledger "${name}" creation failed:`, err);
+    }
+  } catch (e) {
+    console.log(`⚠️ Ledger "${name}" creation error:`, e.message);
+  }
+}
+
+// `ledgerNames.cash` (Phase 2, optional): skip creating the generic "Cash"
+// ledger when the CA has already mapped a real Tally cash ledger — it
+// already exists in Tally, so there's nothing to create.
+async function ensureCashLedger(tallyUrl, ledgerNames = {}) {
+  if (ledgerNames.cash) {
+    return;
+  }
   const { create } = require('xmlbuilder2');
   const xml = create({ version: '1.0' })
     .ele('ENVELOPE')
@@ -45,10 +75,12 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
       });
 
       const payments = res.data.payments || [];
+      const ledgerNames = res.data.ledger_names || {};
       for (const p of payments) {
         try {
-          await ensureCashLedger(tallyUrl);
-          const xml = buildReceiptXML(p);
+          await ensureCashLedger(tallyUrl, ledgerNames);
+          await ensureCustomLedger(tallyUrl, p.account_create_name, p.account_create_parent, 'Bank Accounts');
+          const xml = buildReceiptXML(p, ledgerNames);
           const tallyRes = await axios.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' } });
 
           if (tallyRes.data.includes('Unknown Request')) throw new Error('Tally rejected receipt: Unknown Request');
@@ -82,4 +114,4 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
   return results;
 }
 
-module.exports = { paymentLoop, ensureCashLedger };
+module.exports = { paymentLoop, ensureCashLedger, ensureCustomLedger };
