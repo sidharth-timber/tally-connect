@@ -1,10 +1,11 @@
 const axios = require('axios');
-const { extractLineError } = require('../tally/tallyClient');
+const { describeError } = require('../tally/errors');
+const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
 const {
   categoryToLedger, buildExpenseLedgerXML, buildBankLedgerXML, buildGSTInputLedgerXML,
   buildTDSPayableLedgerXML, buildExpenseXML,
 } = require('../tally/xmlBuilders');
-const { fetchTallyExpenseVoucherNumber } = require('../tally/voucherLookup');
+const { fetchTallyExpenseVoucherNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 const { ensureCashLedger, ensureCustomLedger } = require('./paymentLoop');
 
@@ -100,12 +101,18 @@ async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           const rawDate = expense.date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
-          const tallyVoucherNumber = await fetchTallyExpenseVoucherNumber(dateStr, expense.total, tallyUrl);
+          const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
+            || await fetchTallyExpenseVoucherNumber(
+            dateStr,
+            [expense.total, expense.total - (expense.has_tds ? expense.tds_amount || 0 : 0)],
+            tallyUrl,
+            expense.narration || expense.notes
+          );
           await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'success', error: '', tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           console.error(`❌ Expense ${expense.id} failed:`, err.message);
-          await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'error', error: err.message, tallyVoucherNumber: null });
+          await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
           failed++;
         }
       }

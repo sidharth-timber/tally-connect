@@ -61,24 +61,29 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     emitter.emit('state-changed', state);
   }
 
+  // One status per company for the whole cycle: the worst outcome of any loop
+  // wins. (Previously each loop overwrote the last, so the final loop's
+  // success hid earlier failures and the UI said "Synced" after every
+  // document had failed.)
   function applyLoopResults(resultsArrays) {
     const now = new Date().toISOString();
+    const rank = { success: 0, partial: 1, error: 2 };
+    const worst = new Map();
     for (const results of resultsArrays) {
       for (const r of results) {
-        const company = companiesById.get(r.company_id);
-        if (!company) continue;
-        company.lastSyncedAt = now;
-        if (r.error) {
-          company.lastSyncStatus = 'error';
-          company.lastSyncError = r.error;
-        } else if (r.failed > 0) {
-          company.lastSyncStatus = 'partial';
-          company.lastSyncError = null;
-        } else {
-          company.lastSyncStatus = 'success';
-          company.lastSyncError = null;
+        const status = r.error ? 'error' : r.failed > 0 ? 'partial' : 'success';
+        const prev = worst.get(r.company_id);
+        if (!prev || rank[status] > rank[prev.status]) {
+          worst.set(r.company_id, { status, error: r.error || null });
         }
       }
+    }
+    for (const [companyId, { status, error }] of worst) {
+      const company = companiesById.get(companyId);
+      if (!company) continue;
+      company.lastSyncedAt = now;
+      company.lastSyncStatus = status;
+      company.lastSyncError = error;
     }
   }
 
@@ -150,6 +155,23 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     const company = companiesById.get(companyId);
     if (!company) return { ok: false, error: 'Unknown company' };
     if (company.syncing) return { ok: false, error: 'Already syncing' };
+
+    // Refuse to push anything unless Tally is reachable and has THIS client's
+    // company open — otherwise every document errors one by one (or worse,
+    // posts into whichever other company happens to be loaded).
+    const tally = await checkTallyStatus(tallyUrl);
+    let preflightError = null;
+    if (!tally.connected) {
+      preflightError = 'Tally Prime is not reachable. Open Tally with the company loaded (XML server enabled) and sync again.';
+    } else if (company.tally_company_name && tally.currentCompany && tally.currentCompany !== company.tally_company_name) {
+      preflightError = 'Tally has "' + tally.currentCompany + '" open, but this client is mapped to "' + company.tally_company_name + '". Open the right company and sync again.';
+    }
+    if (preflightError) {
+      company.lastSyncStatus = 'error';
+      company.lastSyncError = preflightError;
+      emitState();
+      return { ok: false, error: preflightError };
+    }
 
     company.syncing = true;
     emitState();

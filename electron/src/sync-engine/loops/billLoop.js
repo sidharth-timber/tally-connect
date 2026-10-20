@@ -1,10 +1,11 @@
 const axios = require('axios');
-const { extractLineError } = require('../tally/tallyClient');
+const { describeError } = require('../tally/errors');
+const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
 const {
   buildPurchaseAccountXML, buildUnitXML, buildItemXML, buildGSTInputLedgerXML,
   buildVendorLedgerXML, buildPurchaseXML,
 } = require('../tally/xmlBuilders');
-const { fetchTallyPurchaseVoucherNumber } = require('../tally/voucherLookup');
+const { fetchTallyPurchaseVoucherNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 const { ensureCustomLedger } = require('./paymentLoop');
 
@@ -124,12 +125,13 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           const rawDate = bill.bill_date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
-          const tallyVoucherNumber = await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount, tallyUrl);
+          const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
+            || await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount, tallyUrl);
           await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'success', error: '', tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           console.error(`❌ Bill ${bill.id} failed:`, err.message);
-          await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'error', error: err.message, tallyVoucherNumber: null });
+          await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
           failed++;
         }
       }

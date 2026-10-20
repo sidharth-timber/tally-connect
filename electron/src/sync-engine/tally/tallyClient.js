@@ -8,6 +8,14 @@ function extractLineError(tallyResponse) {
   return match ? match[1] : null;
 }
 
+// Tally returns the master id of the voucher it just saved. It is the only
+// reliable handle on that voucher: party + amount is ambiguous as soon as two
+// documents share both.
+function extractVoucherId(tallyResponse) {
+  const match = String(tallyResponse).match(/<LASTVCHID>\s*(\d+)\s*<\/LASTVCHID>/);
+  return match && match[1] !== '0' ? match[1] : null;
+}
+
 function dayBookXML(dateStr) {
   return `<?xml version="1.0"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE>${dateStr}</SVFROMDATE><SVTODATE>${dateStr}</SVTODATE></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
 }
@@ -57,6 +65,7 @@ async function checkTallyStatus(tallyUrl = DEFAULT_TALLY_URL) {
 module.exports = {
   DEFAULT_TALLY_URL,
   extractLineError,
+  extractVoucherId,
   fetchTallyCompanies,
   checkTallyStatus,
 };

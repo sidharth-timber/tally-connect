@@ -1,7 +1,8 @@
 const axios = require('axios');
-const { extractLineError } = require('../tally/tallyClient');
+const { describeError } = require('../tally/errors');
+const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
 const { buildReceiptXML, buildCustomLedgerXML } = require('../tally/xmlBuilders');
-const { fetchTallyReceiptNumber } = require('../tally/voucherLookup');
+const { fetchTallyReceiptNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 
 // Create-fallback (Phase 2c): creates a ledger under an arbitrary name/parent
@@ -96,12 +97,13 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           const rawDate = p.date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
-          const receiptNumber = await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount, tallyUrl);
+          const receiptNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
+            || await fetchTallyReceiptNumber(dateStr, p.customer_name, p.amount, tallyUrl);
           await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'success', error: '', receiptNumber });
           succeeded++;
         } catch (err) {
           console.error(`❌ Payment ${p.id} failed:`, err.message);
-          await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'error', error: err.message, receiptNumber: null });
+          await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'error', error: describeError(err), receiptNumber: null });
           failed++;
         }
       }

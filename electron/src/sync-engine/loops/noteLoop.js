@@ -1,10 +1,11 @@
 const axios = require('axios');
-const { extractLineError } = require('../tally/tallyClient');
+const { describeError } = require('../tally/errors');
+const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
 const {
   buildUnitXML, buildStockGroupXML, buildSalesLedgerXML, buildGSTLedgerXML,
   buildLedgerXML, buildItemXML, buildCreditNoteXML, buildDebitNoteXML,
 } = require('../tally/xmlBuilders');
-const { fetchTallyNoteVoucherNumber } = require('../tally/voucherLookup');
+const { fetchTallyNoteVoucherNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 const { ensureCustomLedger } = require('./paymentLoop');
 
@@ -128,7 +129,8 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
           const rawDate = note.issue_date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
-          const tallyVoucherNumber = await fetchTallyNoteVoucherNumber(
+          const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
+            || await fetchTallyNoteVoucherNumber(
             kind.vchType, dateStr, note.customer?.name || '', note.total, tallyUrl
           );
           await reportSyncStatus(auth, kind.statusEvent, company_id, {
@@ -138,7 +140,7 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
         } catch (err) {
           console.error(`❌ ${kind.vchType} ${note.id} failed:`, err.message);
           await reportSyncStatus(auth, kind.statusEvent, company_id, {
-            [kind.idKey]: note.id, status: 'error', error: err.message, tallyVoucherNumber: null,
+            [kind.idKey]: note.id, status: 'error', error: describeError(err), tallyVoucherNumber: null,
           });
           failed++;
         }

@@ -16,6 +16,32 @@ function dayBookRangeXML(dateStr) {
 </ENVELOPE>`;
 }
 
+// Tally often records the cash/bank ledger (not the customer/vendor) as the
+// PARTYLEDGERNAME of Receipt and Payment vouchers, so the party is matched
+// against every ledger entry on the voucher as well.
+function ledgerNamesOf(body) {
+  return [...body.matchAll(/<LEDGERNAME>(.*?)<\/LEDGERNAME>/g)].map(m => m[1].trim().toLowerCase());
+}
+
+function partyMatches(body, get, partyName) {
+  const want = String(partyName || '').trim().toLowerCase();
+  if (!want) return false;
+  const name = (get('PARTYNAME') || get('PARTYLEDGERNAME')).toLowerCase();
+  return name === want || ledgerNamesOf(body).includes(want);
+}
+
+function anyEntryAmountMatches(body, amounts) {
+  const wanted = [].concat(amounts).filter(a => typeof a === 'number' && !Number.isNaN(a));
+  return [...body.matchAll(/<AMOUNT>(.*?)<\/AMOUNT>/g)].some(([, raw]) => {
+    const amt = Math.abs(parseFloat(raw));
+    return !Number.isNaN(amt) && wanted.some(w => Math.abs(amt - w) <= 1);
+  });
+}
+
+function unescapeXml(str) {
+  return String(str || '').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
+}
+
 async function fetchTallyVoucherNumber(dateStr, partyName, total, tallyUrl = DEFAULT_TALLY_URL) {
   try {
     const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), {
@@ -86,17 +112,8 @@ async function fetchTallyReceiptNumber(dateStr, partyName, amount, tallyUrl = DE
 
     for (const [, body] of blocks) {
       const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
-      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
-      if (name.toLowerCase() !== partyName.toLowerCase()) continue;
-
-      const allEntries = [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)];
-      const partyEntry = allEntries.find(([, b]) => /<ISDEEMEDPOSITIVE>No<\/ISDEEMEDPOSITIVE>/i.test(b));
-      if (partyEntry) {
-        const amtMatch = partyEntry[1].match(/<AMOUNT>(.*?)<\/AMOUNT>/);
-        const tallyAmt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
-        if (tallyAmt !== null && Math.abs(tallyAmt - amount) > 1) continue;
-      }
-
+      if (!partyMatches(body, get, partyName)) continue;
+      if (!anyEntryAmountMatches(body, amount)) continue;
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
@@ -112,18 +129,8 @@ async function fetchTallyPaymentNumber(dateStr, vendorName, amount, tallyUrl = D
       .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
     for (const [, body] of blocks) {
       const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
-      const name = get('PARTYNAME') || get('PARTYLEDGERNAME');
-      if (name.toLowerCase() !== vendorName.toLowerCase()) continue;
-      const ledgerBodies = [
-        ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
-        ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
-      ];
-      const amountMatched = ledgerBodies.some(b => {
-        const amtMatch = b.match(/<AMOUNT>(.*?)<\/AMOUNT>/);
-        const amt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
-        return amt !== null && Math.abs(amt - amount) <= 1;
-      });
-      if (!amountMatched) continue;
+      if (!partyMatches(body, get, vendorName)) continue;
+      if (!anyEntryAmountMatches(body, amount)) continue;
       return get('VOUCHERNUMBER');
     }
   } catch (e) {
@@ -163,23 +170,19 @@ async function fetchTallyNoteVoucherNumber(vchType, dateStr, partyName, total, t
   return null;
 }
 
-async function fetchTallyExpenseVoucherNumber(dateStr, amount, tallyUrl = DEFAULT_TALLY_URL) {
+// `amounts` may list several candidates (gross total and net-of-TDS bank
+// amount). With `narration`, the voucher must carry the same narration — amount
+// alone also matches unrelated Payment vouchers of equal value.
+async function fetchTallyExpenseVoucherNumber(dateStr, amounts, tallyUrl = DEFAULT_TALLY_URL, narration = '') {
   try {
     const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)]
       .filter(([, body]) => /<VOUCHERTYPENAME>\s*Payment\s*<\/VOUCHERTYPENAME>/i.test(body));
+    const wantNarration = String(narration || '').trim().toLowerCase();
     for (const [, body] of blocks) {
       const get = tag => { const m = body.match(new RegExp(`<${tag}>(.*?)<\\/${tag}>`)); return m ? m[1].trim() : ''; };
-      const allEntries = [
-        ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
-        ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
-      ];
-      const matched = allEntries.some(b => {
-        const amtMatch = b.match(/<AMOUNT>(.*?)<\/AMOUNT>/);
-        const amt = amtMatch ? Math.abs(parseFloat(amtMatch[1])) : null;
-        return amt !== null && Math.abs(amt - amount) <= 1;
-      });
-      if (matched) return get('VOUCHERNUMBER');
+      if (wantNarration && unescapeXml(get('NARRATION')).toLowerCase() !== wantNarration) continue;
+      if (anyEntryAmountMatches(body, amounts)) return get('VOUCHERNUMBER');
     }
   } catch (e) {
     console.error('[sync-engine] fetchTallyExpenseVoucherNumber error:', e.message);
@@ -187,7 +190,29 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amount, tallyUrl = DEFAUL
   return null;
 }
 
+// Resolves the voucher number of a just-posted voucher from its master id
+// (see extractVoucherId). Returns null when the id is unknown or not found, so
+// callers fall back to the party/amount heuristic.
+async function fetchTallyVoucherNumberById(dateStr, voucherId, tallyUrl = DEFAULT_TALLY_URL) {
+  if (!voucherId) return null;
+  try {
+    const res = await axios.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
+    const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)];
+    for (const [, body] of blocks) {
+      const id = (body.match(/<MASTERID>\s*(\d+)\s*<\/MASTERID>/) || [])[1];
+      if (id === String(voucherId)) {
+        const number = (body.match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/) || [])[1];
+        return number ? number.trim() : null;
+      }
+    }
+  } catch (e) {
+    console.error('[sync-engine] fetchTallyVoucherNumberById error:', e.message);
+  }
+  return null;
+}
+
 module.exports = {
+  fetchTallyVoucherNumberById,
   fetchTallyVoucherNumber,
   fetchTallyPurchaseVoucherNumber,
   fetchTallyReceiptNumber,

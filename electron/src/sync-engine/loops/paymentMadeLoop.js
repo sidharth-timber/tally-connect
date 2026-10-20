@@ -1,7 +1,8 @@
 const axios = require('axios');
-const { extractLineError } = require('../tally/tallyClient');
+const { describeError } = require('../tally/errors');
+const { extractLineError, extractVoucherId } = require('../tally/tallyClient');
 const { buildPaymentVoucherXML } = require('../tally/xmlBuilders');
-const { fetchTallyPaymentNumber } = require('../tally/voucherLookup');
+const { fetchTallyPaymentNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
 const { ensureCashLedger, ensureCustomLedger } = require('./paymentLoop');
 
@@ -40,12 +41,13 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
           const rawDate = p.date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
-          const paymentNumber = await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount, tallyUrl);
+          const paymentNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
+            || await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount, tallyUrl);
           await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'success', error: '', paymentNumber });
           succeeded++;
         } catch (err) {
           console.error(`❌ Vendor payment ${p.id} failed:`, err.message);
-          await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'error', error: err.message, paymentNumber: null });
+          await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'error', error: describeError(err), paymentNumber: null });
           failed++;
         }
       }
