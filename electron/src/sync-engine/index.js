@@ -8,6 +8,7 @@ const { paymentLoop } = require('./loops/paymentLoop');
 const { billLoop } = require('./loops/billLoop');
 const { paymentMadeLoop } = require('./loops/paymentMadeLoop');
 const { expenseLoop } = require('./loops/expenseLoop');
+const { journalLoop } = require('./loops/journalLoop');
 const { creditNoteLoop, debitNoteLoop } = require('./loops/noteLoop');
 const { pullLoop } = require('./loops/pullLoop');
 const { coaLoop, fetchAndPushCOA } = require('./loops/coaLoop');
@@ -119,7 +120,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     const resultsArrays = [];
     for (const loop of [
       invoiceLoop, paymentLoop, billLoop,
-      paymentMadeLoop, expenseLoop,
+      paymentMadeLoop, expenseLoop, journalLoop,
       creditNoteLoop, debitNoteLoop, pullLoop,
     ]) {
       resultsArrays.push(await loop(ctx));

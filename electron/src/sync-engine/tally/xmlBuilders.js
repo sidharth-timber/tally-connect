@@ -1177,7 +1177,65 @@ function buildExpenseXML(expense, ledgerNames = {}) {
   return doc.end({ prettyPrint: true });
 }
 
+// Manual journal entry → Tally Journal voucher.
+// Every line is one debit or one credit on a single ledger: a debit is
+// ISDEEMEDPOSITIVE=Yes with a negative amount, a credit is No with a positive
+// amount (same convention as every other voucher here). A line carrying both
+// debit and credit is netted. The journal must balance — the backend refuses
+// to send one that doesn't, but a rounding drift under one rupee is tolerated
+// by posting it to the first line so Tally's own balance check passes.
+function buildJournalXML(journal) {
+  const rawDate = journal.date || new Date().toISOString();
+  const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
+    .split('T')[0].replace(/-/g, '');
+  const round = n => Math.round(n * 100) / 100;
+
+  const lines = (journal.lines || [])
+    .map(l => {
+      const net = round((l.debit || 0) - (l.credit || 0));
+      const name = l.ledger_name || l.create_name || 'Suspense A/c';
+      return { name, amount: Math.abs(net), isDebit: net > 0 };
+    })
+    .filter(l => l.amount > 0);
+
+  const drift = round(
+    lines.filter(l => l.isDebit).reduce((s, l) => s + l.amount, 0) -
+    lines.filter(l => !l.isDebit).reduce((s, l) => s + l.amount, 0)
+  );
+  if (drift !== 0 && Math.abs(drift) < 1 && lines.length) {
+    // fold the sub-rupee difference into the first line on the lighter side
+    const target = lines.find(l => l.isDebit === (drift < 0)) || lines[0];
+    target.amount = round(target.amount + Math.abs(drift));
+  }
+
+  const doc = create({ version: '1.0' });
+  const envelope = doc.ele('ENVELOPE');
+  envelope.ele('HEADER').ele('TALLYREQUEST').txt('Import Data');
+  const importData = envelope.ele('BODY').ele('IMPORTDATA');
+  importData.ele('REQUESTDESC').ele('REPORTNAME').txt('Vouchers');
+
+  const voucher = importData.ele('REQUESTDATA')
+    .ele('TALLYMESSAGE', { 'xmlns:UDF': 'TallyUDF' })
+    .ele('VOUCHER', { VCHTYPE: 'Journal', ACTION: 'Create' });
+
+  voucher.ele('DATE').txt(dateStr);
+  voucher.ele('EFFECTIVEDATE').txt(dateStr);
+  voucher.ele('VOUCHERTYPENAME').txt('Journal');
+  voucher.ele('PERSISTEDVIEW').txt('Accounting Voucher View');
+  voucher.ele('NARRATION').txt(journal.narration || journal.voucher_ref || '');
+
+  for (const line of lines) {
+    const entry = voucher.ele('ALLLEDGERENTRIES.LIST');
+    entry.ele('LEDGERNAME').txt(line.name);
+    entry.ele('ISDEEMEDPOSITIVE').txt(line.isDebit ? 'Yes' : 'No');
+    entry.ele('AMOUNT').txt((line.isDebit ? '-' : '') + line.amount);
+  }
+
+  return doc.end({ prettyPrint: true });
+}
+
 module.exports = {
+  buildJournalXML,
   buildCustomLedgerXML,
   buildUnitXML,
   buildLedgerXML,
