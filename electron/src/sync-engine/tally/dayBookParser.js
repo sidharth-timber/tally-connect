@@ -8,6 +8,63 @@ function parseTallyQty(s) {
   return parseFloat((s || '1').trim().split(/\s+/)[0]) || 1;
 }
 
+// Unit is the word after the quantity: " 2 PIECES", "1.5 KGS".
+function parseTallyUnit(s) {
+  const m = String(s || '').trim().match(/^[\d.,]+\s+(.+)$/);
+  return m ? m[1].trim() : '';
+}
+
+// Item discount is exported as a percentage ("<DISCOUNT> 10</DISCOUNT>").
+function parseTallyDiscount(s) {
+  const n = parseFloat(String(s || '').trim());
+  return Number.isFinite(n) && n > 0 && n <= 100 ? n : 0;
+}
+
+const MONTHS = ['jan', 'feb', 'mar', 'apr', 'may', 'jun', 'jul', 'aug', 'sep', 'oct', 'nov', 'dec'];
+
+function toYmd(d) {
+  return d.getFullYear() + String(d.getMonth() + 1).padStart(2, '0') + String(d.getDate()).padStart(2, '0');
+}
+
+// A party's bill allocation carries the credit period the invoice was raised with —
+// <BILLCREDITPERIOD P="30 Days">30 Days</BILLCREDITPERIOD> — either a length ("30 Days",
+// "2 Weeks", "1 Month") or a fixed date ("15-Nov-26"). Returns the due date as YYYYMMDD, or ''
+// when the voucher has none (the backend then falls back to the issue date).
+function dueDateFromCreditPeriod(body, voucherDate) {
+  const m = [...String(body).matchAll(/<BILLCREDITPERIOD\b[^>]*>([^<]*)<\/BILLCREDITPERIOD>/g)]
+    .map(x => x[1].trim())
+    .find(Boolean);
+  if (!m || !/^\d{8}$/.test(voucherDate || '')) return '';
+  const base = new Date(+voucherDate.slice(0, 4), +voucherDate.slice(4, 6) - 1, +voucherDate.slice(6, 8));
+
+  const span = m.match(/^(\d+)\s*(day|week|month|year)s?$/i);
+  if (span) {
+    const n = +span[1];
+    const unit = span[2].toLowerCase();
+    if (unit === 'day') base.setDate(base.getDate() + n);
+    else if (unit === 'week') base.setDate(base.getDate() + 7 * n);
+    else if (unit === 'month') base.setMonth(base.getMonth() + n);
+    else base.setFullYear(base.getFullYear() + n);
+    return toYmd(base);
+  }
+
+  const fixed = m.match(/^(\d{1,2})-([A-Za-z]{3})[A-Za-z]*-(\d{2,4})$/);
+  if (fixed) {
+    const month = MONTHS.indexOf(fixed[2].toLowerCase());
+    if (month < 0) return '';
+    const year = fixed[3].length === 2 ? 2000 + +fixed[3] : +fixed[3];
+    return toYmd(new Date(year, month, +fixed[1]));
+  }
+  return '';
+}
+
+// How a Receipt/Payment was settled, when the voucher records it (bank allocation's transaction
+// type: "Cheque", "e-Fund Transfer", "Cash", ...). The backend falls back to the ledger's group.
+function paymentModeHint(body) {
+  const m = String(body).match(/<TRANSACTIONTYPE>([^<]+)<\/TRANSACTIONTYPE>/);
+  return m ? m[1].trim() : '';
+}
+
 function sumLedger(blocks, name) {
   return blocks
     .filter(e => (e.ledger || '').toUpperCase().includes(name.toUpperCase()))
@@ -55,7 +112,9 @@ function parseVouchers(xml) {
           rate: parseTallyAmt(g('RATE')),
           amount: Math.abs(parseTallyAmt(g('AMOUNT'))),
           hsn: g('HSNCODE'),
-          gst_rate: halfRate * 2
+          gst_rate: halfRate * 2,
+          unit: parseTallyUnit(g('BILLEDQTY')),
+          disc: parseTallyDiscount(g('DISCOUNT'))
         };
       });
 
@@ -71,6 +130,7 @@ function parseVouchers(xml) {
       // voucher number, so the backend needs it to match receipts back.
       reference_no: get('REFERENCE'),
       date: get('DATE'),
+      due_date: dueDateFromCreditPeriod(body, get('DATE')),
       party_name: get('PARTYNAME') || get('PARTYLEDGERNAME'),
       gstin: get('PARTYGSTIN'),
       items: invBlocks,
@@ -118,6 +178,7 @@ function parseReceipts(xml) {
           party_name,
           invoice_voucher_number,
           amount,
+          payment_mode_hint: paymentModeHint(body),
           ledger_entries: voucherLedgerEntries
         });
       }
@@ -137,8 +198,7 @@ function parsePurchases(xml) {
       .map(([, b]) => {
         const g = t => { const m = b.match(new RegExp(`<${t}>(.*?)<\\/${t}>`)); return m ? m[1].trim() : ''; };
         const billedQtyStr = g('BILLEDQTY');
-        const unitMatch = billedQtyStr.match(/[\d.]+\s+(\S+)/);
-        const unit = unitMatch ? unitMatch[1] : 'PIECES';
+        const unit = parseTallyUnit(billedQtyStr) || 'PIECES';
         return {
           name: g('STOCKITEMNAME'),
           qty: parseTallyQty(billedQtyStr),
@@ -146,6 +206,7 @@ function parsePurchases(xml) {
           amount: Math.abs(parseTallyAmt(g('AMOUNT'))),
           hsn: g('HSNCODE'),
           unit,
+          disc: parseTallyDiscount(g('DISCOUNT')),
         };
       })
       .filter(i => i.name);
@@ -176,6 +237,7 @@ function parsePurchases(xml) {
       // voucher number, so the backend needs it to match payments back.
       supplier_invoice_no: get('REFERENCE'),
       date: get('DATE'),
+      due_date: dueDateFromCreditPeriod(body, get('DATE')),
       party_name: get('PARTYNAME') || get('PARTYLEDGERNAME'),
       gstin: get('PARTYGSTIN'),
       is_inventory_purchase: invBlocks.length > 0,
@@ -217,7 +279,7 @@ function parsePayments(xml) {
         const amount = Math.abs(parseTallyAmt(ga('AMOUNT')));
         if (!bill_voucher_number || amount <= 0) continue;
         if (billType && billType !== 'Agst Ref' && billType !== 'On Account') continue;
-        results.push({ payment_number, date, party_name, bill_voucher_number, amount, ledger_entries: voucherLedgerEntries });
+        results.push({ payment_number, date, party_name, bill_voucher_number, amount, payment_mode_hint: paymentModeHint(body), ledger_entries: voucherLedgerEntries });
       }
     }
   }
@@ -255,7 +317,9 @@ function parseNotes(xml, vchType) {
           qty: parseTallyQty(g('BILLEDQTY')),
           rate: parseTallyAmt(g('RATE')),
           amount: Math.abs(parseTallyAmt(g('AMOUNT'))),
-          hsn: g('HSNCODE')
+          hsn: g('HSNCODE'),
+          unit: parseTallyUnit(g('BILLEDQTY')),
+          disc: parseTallyDiscount(g('DISCOUNT'))
         };
       })
       .filter(i => i.name);
@@ -307,6 +371,7 @@ function parseDebitNotes(xml) {
 }
 
 module.exports = {
+  dueDateFromCreditPeriod, parseTallyUnit, parseTallyDiscount, paymentModeHint,
   parseVouchers, parseReceipts, parsePurchases, parsePayments,
   parseCreditNotes, parseDebitNotes,
 };
