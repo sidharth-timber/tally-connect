@@ -24,6 +24,12 @@ async function ensureJournalMasters(journal, tallyUrl) {
       if (err && !err.toLowerCase().includes('already exists')) {
         throw new Error('Could not create party ledger "' + line.ledger_name + '": ' + err);
       }
+    } else if (line.ledger_name && line.ledger_parent) {
+      // mapped account: normally exists in Tally already (creation is a no-op then), but a stale
+      // mapping can name a ledger that doesn't
+      if (done.has(line.ledger_name)) continue;
+      done.add(line.ledger_name);
+      await ensureCustomLedger(tallyUrl, line.ledger_name, line.ledger_parent, 'Suspense A/c');
     } else if (!line.ledger_name && line.create_name) {
       if (done.has(line.create_name)) continue;
       done.add(line.create_name);
