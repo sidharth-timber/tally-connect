@@ -1,14 +1,10 @@
 const { ipcMain, shell } = require('electron');
+const logger = require('../sync-engine/logger');
 const { getMainWindow } = require('./window');
 const { submitAgentKey, hasCompletedSetup } = require('./firstRun');
 const { downloadUpdate, quitAndInstall } = require('./autoUpdate');
 const store = require('./config-store');
 const { performLogout, showAppMenu } = require('./logout');
-
-// Timber's web app — CA Settings → Integrations page. Fixed destination for
-// the "Web View" button (not per-company; there's no per-company URL from
-// the backend yet).
-const INTEGRATIONS_URL = 'http://localhost:5176/ca/settings/integrations';
 
 function registerIpcHandlers(engine) {
   ipcMain.handle('sync:get-state', () => engine.getState());
@@ -17,6 +13,32 @@ function registerIpcHandlers(engine) {
   // the only action that does that.
   ipcMain.handle('sync:refresh', () => engine.refresh());
   ipcMain.handle('sync:company', (_e, companyId) => engine.syncCompany(companyId));
+
+  // Logs view: history from the in-memory buffer (seeded from sync.log), then live entries.
+
+  ipcMain.handle('logs:get', () => logger.getRecent());
+
+  ipcMain.handle('logs:open-file', async () => {
+
+    const file = logger.getLogFilePath();
+
+    if (!file) return { ok: false };
+
+    shell.showItemInFolder(file);
+
+    return { ok: true };
+
+  });
+
+  logger.events.on('entry', (entry) => {
+
+    const win = getMainWindow();
+
+    if (win && !win.isDestroyed()) win.webContents.send('logs:entry', entry);
+
+  });
+
+  
 
   ipcMain.handle('setup:has-completed', () => hasCompletedSetup());
   ipcMain.handle('auth:logout', () => performLogout(engine));
@@ -45,11 +67,6 @@ function registerIpcHandlers(engine) {
 
   ipcMain.on('window:minimize', () => getMainWindow()?.minimize());
   ipcMain.on('window:close', () => getMainWindow()?.close());
-
-  ipcMain.handle('webview:open', () => {
-    shell.openExternal(INTEGRATIONS_URL);
-    return { ok: true };
-  });
 
   engine.on('state-changed', (state) => {
     const win = getMainWindow();

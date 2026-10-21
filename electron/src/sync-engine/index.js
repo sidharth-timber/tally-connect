@@ -1,5 +1,6 @@
 const EventEmitter = require('events');
 const logger = require('./logger');
+const { describeError } = require('./tally/errors');
 const { agentInit } = require('./agentInit');
 const { checkTallyStatus, DEFAULT_TALLY_URL } = require('./tally/tallyClient');
 const { createInitialState } = require('./state');
@@ -125,7 +126,13 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       paymentMadeLoop, expenseLoop, journalLoop,
       creditNoteLoop, debitNoteLoop, pullLoop,
     ]) {
-      resultsArrays.push(await loop(ctx));
+      const loopResults = await loop(ctx);
+      for (const r of loopResults) {
+        if (r.succeeded || r.failed || r.error) {
+          logger.log('• ' + (loop.name || 'loop').replace(/Loop$/, '') + ': ' + (r.succeeded || 0) + ' ok, ' + (r.failed || 0) + ' failed' + (r.error ? ' — ' + r.error : ''));
+        }
+      }
+      resultsArrays.push(loopResults);
     }
     applyLoopResults(resultsArrays);
   }
@@ -174,6 +181,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       preflightError = 'Tally has "' + tally.currentCompany + '" open, but this client is mapped to "' + company.tally_company_name + '". Open the right company and sync again.';
     }
     if (preflightError) {
+      logger.error('✖ Sync not started: ' + preflightError);
       company.lastSyncStatus = 'error';
       company.lastSyncError = preflightError;
       emitState();
@@ -181,9 +189,13 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     }
 
     company.syncing = true;
+
+    logger.log('▶ Sync started for ' + (company.tally_company_name || company.company_name || company.company_id));
+
     emitState();
     try {
       await runSyncCycle([company]);
+      logger.log(company.lastSyncFailed ? '■ Sync finished with ' + company.lastSyncFailed + ' failure(s) — see the errors above' : '■ Sync finished');
       return { ok: true };
     } catch (err) {
       company.lastSyncStatus = 'error';
@@ -233,7 +245,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       emitter.emit('agent-init', { latestVersion, downloadUrl });
       await autoImportCOA();
     } catch (err) {
-      logger.error('[sync-engine] agentInit failed:', err.response?.data || err.message);
+      logger.error('[sync-engine] Could not reach Timber: ' + describeError(err));
     }
     emitState();
   }

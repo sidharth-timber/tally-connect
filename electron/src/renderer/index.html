@@ -38,6 +38,21 @@
       <button id="setup-submit">Connect</button>
     </div>
 
+    <div id="logs-panel" class="hidden">
+      <div class="logs-header">
+        <button id="logs-back" class="logs-btn">&larr; Back</button>
+        <span class="logs-title">Activity log</span>
+        <select id="logs-filter" class="logs-select" title="Filter">
+          <option value="all">All</option>
+          <option value="issues">Errors &amp; warnings</option>
+        </select>
+        <button id="logs-copy" class="logs-btn">Copy</button>
+        <button id="logs-open" class="logs-btn" title="Show sync.log in its folder">Open file</button>
+        <button id="logs-clear" class="logs-btn" title="Clear this view (the file is kept)">Clear</button>
+      </div>
+      <div id="logs-list"></div>
+    </div>
+
     <div id="company-list" class="hidden"></div>
 
     <div id="empty-state" class="hidden">
@@ -46,6 +61,7 @@
     </div>
 
     <div id="footer">
+      <button id="logs-link" class="footer-link hidden">&#9776; Logs</button>
       <a href="mailto:support@timber.me">&#9993; support@timber.me</a>
     </div>
   </div>

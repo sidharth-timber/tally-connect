@@ -15,7 +15,7 @@ function formatRelativeSync(lastSyncedAt) {
   return { text, cls };
 }
 
-export function renderCompanyRow(company, { onWebView, onSync }) {
+export function renderCompanyRow(company, { onSync }) {
   const row = document.createElement('div');
   row.className = 'company-row';
 
@@ -43,15 +43,6 @@ export function renderCompanyRow(company, { onWebView, onSync }) {
   syncBtn.disabled = !!company.syncing;
   syncBtn.addEventListener('click', () => onSync(company.company_id));
 
-  const webViewBtn = document.createElement('button');
-  webViewBtn.className = 'pill-button';
-  webViewBtn.textContent = '🌐 Web View';
-  webViewBtn.addEventListener('click', () => onWebView(company.company_id));
-
-  const menuBtn = document.createElement('button');
-  menuBtn.className = 'icon-button';
-  menuBtn.textContent = '⋮';
-
   const syncStatus = company.syncing
     ? { text: 'Syncing…', cls: 'ok' }
     : company.lastSyncStatus === 'error'
@@ -71,8 +62,6 @@ export function renderCompanyRow(company, { onWebView, onSync }) {
   }
 
   side.appendChild(syncBtn);
-  side.appendChild(webViewBtn);
-  side.appendChild(menuBtn);
 
   row.appendChild(info);
   row.appendChild(syncTime);

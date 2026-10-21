@@ -2,11 +2,23 @@ import { initTitlebar, renderUpdateButton } from './components/titlebar.js';
 import { initStatusRow, renderStatusRow } from './components/statusRow.js';
 import { renderCompanyRow } from './components/companyRow.js';
 import { renderEmptyState } from './components/emptyState.js';
+import { initLogsPanel, showLogsPanel } from './components/logsPanel.js';
 import { initSetupScreen, resetSetupScreen, showSetupScreen } from './components/setupScreen.js';
 
 const companyListEl = document.getElementById('company-list');
 const statusRowEl = document.getElementById('status-row');
 const appVersionEl = document.getElementById('app-version');
+const logsLinkEl = document.getElementById('logs-link');
+
+// The Logs view takes the place of the company list; the status row and footer stay.
+let logsOpen = false;
+async function setLogsOpen(open) {
+  logsOpen = open;
+  await showLogsPanel(open);
+  companyListEl.classList.toggle('hidden', open || companyListEl.childElementCount === 0);
+  if (open) renderEmptyState(false);
+  logsLinkEl.textContent = open ? '\u25A4 Companies' : '\u2630 Logs';
+}
 
 function renderVersion(agentVersion) {
   appVersionEl.textContent = agentVersion ? `v${agentVersion}` : '';
@@ -15,6 +27,11 @@ function renderVersion(agentVersion) {
 function renderState(state) {
   renderVersion(state.agentVersion);
   const companies = state.companies || [];
+  if (logsOpen) {
+    renderStatusRow(state.connection);
+    renderUpdateButton(state.updateStatus);
+    return;
+  }
 
   companyListEl.innerHTML = '';
   if (companies.length === 0) {
@@ -25,7 +42,6 @@ function renderState(state) {
     renderEmptyState(false);
     for (const company of companies) {
       companyListEl.appendChild(renderCompanyRow(company, {
-        onWebView: (companyId) => window.tallyAgent.openWebView(companyId),
         onSync: (companyId) => window.tallyAgent.syncCompany(companyId),
       }));
     }
@@ -38,6 +54,7 @@ function renderState(state) {
 function showMainView() {
   showSetupScreen(false);
   statusRowEl.classList.remove('hidden');
+  logsLinkEl.classList.remove('hidden');
 }
 
 async function boot() {
@@ -59,6 +76,12 @@ async function boot() {
     },
   });
 
+  initLogsPanel({ onClose: async () => { await setLogsOpen(false); renderState(await window.tallyAgent.getState()); } });
+  logsLinkEl.addEventListener('click', async () => {
+    await setLogsOpen(!logsOpen);
+    if (!logsOpen) renderState(await window.tallyAgent.getState());
+  });
+
   initStatusRow({
     onRefresh: () => window.tallyAgent.refresh(),
   });
@@ -77,6 +100,8 @@ async function boot() {
   // Logout (title-bar menu or tray): drop the company list and go back to the
   // key entry screen.
   window.tallyAgent.onLoggedOut(() => {
+    if (logsOpen) setLogsOpen(false);
+    logsLinkEl.classList.add('hidden');
     companyListEl.innerHTML = '';
     companyListEl.classList.add('hidden');
     renderEmptyState(false);

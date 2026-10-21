@@ -10,6 +10,14 @@ contextBridge.exposeInMainWorld('tallyAgent', {
     return () => ipcRenderer.removeListener('sync:state', handler);
   },
 
+  getLogs: () => ipcRenderer.invoke('logs:get'),
+  openLogFile: () => ipcRenderer.invoke('logs:open-file'),
+  onLogEntry: (cb) => {
+    const handler = (_e, entry) => cb(entry);
+    ipcRenderer.on('logs:entry', handler);
+    return () => ipcRenderer.removeListener('logs:entry', handler);
+  },
+
   hasCompletedSetup: () => ipcRenderer.invoke('setup:has-completed'),
   logout: () => ipcRenderer.invoke('auth:logout'),
   showMenu: () => ipcRenderer.send('menu:show'),
@@ -31,5 +39,4 @@ contextBridge.exposeInMainWorld('tallyAgent', {
   minimize: () => ipcRenderer.send('window:minimize'),
   close: () => ipcRenderer.send('window:close'),
 
-  openWebView: (companyId) => ipcRenderer.invoke('webview:open', companyId),
 });

@@ -10,9 +10,18 @@ const TALLY_TIMEOUT_MS = 90 * 1000;
 const tallyHttp = axios.create({ timeout: TALLY_TIMEOUT_MS });
 
 // 🔎 Extracts error text from Tally response XML string
+// Tally XML-escapes the message ("Ledger &apos;X&apos; does not exist"); users read it in the
+// Logs view and in Timber, so hand it back as plain text.
+function decodeXml(text) {
+  return String(text)
+    .replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+}
+
 function extractLineError(tallyResponse) {
   const match = tallyResponse.match(/<LINEERROR>(.*?)<\/LINEERROR>/);
-  return match ? match[1] : null;
+  return match ? decodeXml(match[1]) : null;
 }
 
 // Tally returns the master id of the voucher it just saved. It is the only
