@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
@@ -92,7 +93,7 @@ const NOTE_KINDS = {
   },
 };
 
-async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const kind = NOTE_KINDS[kindKey];
   const results = [];
   for (const company of companies) {
@@ -104,10 +105,13 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
         event: kind.requestEvent,
+        data: pendingData(batch, company_id, kind.requestEvent),
       });
       const notes = res.data[kind.responseKey] || [];
       const ledgerNames = res.data.ledger_names || {};
       for (const note of notes) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, kind.requestEvent, note.id);
         try {
           await ensureNoteMasterData(note, tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, note.account_create_name, note.account_create_parent, 'Sales Accounts');
@@ -146,6 +150,7 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
           await reportSyncStatus(auth, kind.statusEvent, company_id, {
             [kind.idKey]: note.id, status: 'error', error: describeError(err), tallyVoucherNumber: null,
           });
+          noteFailed(batch, company_id, kind.requestEvent, note.id);
           failed++;
         }
       }

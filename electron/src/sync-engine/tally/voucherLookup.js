@@ -197,8 +197,24 @@ async function fetchTallyExpenseVoucherNumber(dateStr, amounts, tallyUrl = DEFAU
 // Resolves the voucher number of a just-posted voucher from its master id
 // (see extractVoucherId). Returns null when the id is unknown or not found, so
 // callers fall back to the party/amount heuristic.
+// Asks Tally for exactly one voucher, by Master ID, and gets back just its number (a couple of KB,
+// ~50 ms). Scanning the whole day instead exports every voucher on that date — fine for ten, but
+// with thousands of documents per day it made each sync step slower than the one before.
+async function fetchVoucherNumberByMasterId(voucherId, tallyUrl) {
+  const xml = `<ENVELOPE><HEADER><VERSION>1</VERSION><TALLYREQUEST>Export</TALLYREQUEST><TYPE>Collection</TYPE><ID>TimberVoucherById</ID></HEADER><BODY><DESC><STATICVARIABLES><SVEXPORTFORMAT>$SysName:XML</SVEXPORTFORMAT></STATICVARIABLES><TDL><TDLMESSAGE><COLLECTION NAME="TimberVoucherById" ISMODIFY="No"><TYPE>Voucher</TYPE><FILTERS>TimberById</FILTERS><FETCH>VoucherNumber, VoucherTypeName, Date</FETCH></COLLECTION><SYSTEM TYPE="Formulae" NAME="TimberById">$MasterID = ${Number(voucherId)}</SYSTEM></TDLMESSAGE></TDL></DESC></BODY></ENVELOPE>`;
+  const res = await tallyHttp.post(tallyUrl, xml, { headers: { 'Content-Type': 'application/xml' }, timeout: 15000 });
+  const number = (String(res.data).match(/<VOUCHERNUMBER>(.*?)<\/VOUCHERNUMBER>/) || [])[1];
+  return number ? number.trim() : null;
+}
+
 async function fetchTallyVoucherNumberById(dateStr, voucherId, tallyUrl = DEFAULT_TALLY_URL) {
   if (!voucherId) return null;
+  try {
+    const number = await fetchVoucherNumberByMasterId(voucherId, tallyUrl);
+    if (number) return number;
+  } catch (e) {
+    logger.warn('[sync-engine] voucher lookup by id failed, scanning the day instead: ' + e.message);
+  }
   try {
     const res = await tallyHttp.post(tallyUrl, dayBookRangeXML(dateStr), { headers: { 'Content-Type': 'application/xml' }, timeout: 10000 });
     const blocks = [...res.data.matchAll(/<VOUCHER\b[^>]*>([\s\S]*?)<\/VOUCHER>/g)];

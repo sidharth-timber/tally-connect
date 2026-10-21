@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
 const { rollbackVoucher } = require('../tally/deleteVoucher');
@@ -39,7 +40,7 @@ async function ensureJournalMasters(journal, tallyUrl) {
 }
 
 // Syncs pending manual journal entries as Tally Journal vouchers.
-async function journalLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function journalLoop({ companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const results = [];
   for (const company of companies) {
     const { company_id } = company;
@@ -50,9 +51,12 @@ async function journalLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
         event: 'journal-sync-request',
+        data: pendingData(batch, company_id, 'journal-sync-request'),
       });
       const journals = res.data.journals || [];
       for (const journal of journals) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, 'journal-sync-request', journal.id);
         try {
           await ensureJournalMasters(journal, tallyUrl);
           const xml = buildJournalXML(journal);
@@ -76,6 +80,7 @@ async function journalLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         } catch (err) {
           logger.error('❌ Journal ' + journal.id + ' failed: ' + describeError(err));
           await reportSyncStatus(auth, 'journal-sync-status', company_id, { journalId: journal.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
+          noteFailed(batch, company_id, 'journal-sync-request', journal.id);
           failed++;
         }
       }

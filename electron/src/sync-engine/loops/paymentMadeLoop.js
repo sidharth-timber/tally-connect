@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
@@ -9,7 +10,7 @@ const { reportSyncStatus } = require('../reporting');
 const { ensureCashLedger, ensureCustomLedger } = require('./paymentLoop');
 
 // Syncs pending vendor payments (payments made) for every company.
-async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const results = [];
   for (const company of companies) {
     const { company_id } = company;
@@ -19,11 +20,14 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
       const res = await axios.post(`${serverUrl}/webhook`, {
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
-        event: 'payment-made-sync-request'
+        event: 'payment-made-sync-request',
+        data: pendingData(batch, company_id, 'payment-made-sync-request')
       });
       const payments = res.data.payments || [];
       const ledgerNames = res.data.ledger_names || {};
       for (const p of payments) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, 'payment-made-sync-request', p.id);
         try {
           await ensureCashLedger(tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, p.account_create_name, p.account_create_parent, 'Bank Accounts');
@@ -52,6 +56,7 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
         } catch (err) {
           logger.error(`❌ Vendor payment ${p.id} failed:`, err.message);
           await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'error', error: describeError(err), paymentNumber: null });
+          noteFailed(batch, company_id, 'payment-made-sync-request', p.id);
           failed++;
         }
       }

@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
@@ -64,7 +65,7 @@ async function ensureCashLedger(tallyUrl, ledgerNames = {}) {
 }
 
 // Syncs pending customer payments (receipts) for every company.
-async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const results = [];
   for (const company of companies) {
     const { company_id } = company;
@@ -74,12 +75,15 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
       const res = await axios.post(`${serverUrl}/webhook`, {
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
-        event: 'payment-sync-request'
+        event: 'payment-sync-request',
+        data: pendingData(batch, company_id, 'payment-sync-request')
       });
 
       const payments = res.data.payments || [];
       const ledgerNames = res.data.ledger_names || {};
       for (const p of payments) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, 'payment-sync-request', p.id);
         try {
           await ensureCashLedger(tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, p.account_create_name, p.account_create_parent, 'Bank Accounts');
@@ -108,6 +112,7 @@ async function paymentLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         } catch (err) {
           logger.error(`❌ Payment ${p.id} failed:`, err.message);
           await reportSyncStatus(auth, 'payment-sync-status', company_id, { paymentId: p.id, status: 'error', error: describeError(err), receiptNumber: null });
+          noteFailed(batch, company_id, 'payment-sync-request', p.id);
           failed++;
         }
       }

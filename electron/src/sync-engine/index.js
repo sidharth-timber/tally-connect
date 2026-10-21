@@ -1,8 +1,9 @@
 const EventEmitter = require('events');
 const logger = require('./logger');
+const { createBatch } = require('./batch');
 const { describeError } = require('./tally/errors');
 const { agentInit } = require('./agentInit');
-const { checkTallyStatus, DEFAULT_TALLY_URL } = require('./tally/tallyClient');
+const { checkTallyStatus, DEFAULT_TALLY_URL, clearMasterMemo } = require('./tally/tallyClient');
 const { createInitialState } = require('./state');
 const { invoiceLoop } = require('./loops/invoiceLoop');
 const { paymentLoop } = require('./loops/paymentLoop');
@@ -101,6 +102,39 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
   // only thing that actually talks to the backend/Tally beyond company-list
   // and connection-status metadata. It only ever runs on demand (see
   // syncCompany), never on a timer — see the "not automatic" note on start().
+  // Each push loop handles one batch of pending documents per call; keep calling until a batch comes
+  // back empty, so a company with thousands of documents is worked through in pieces. A loop stops
+  // after its time budget (each document type gets its own, so a big backlog of one type can't starve
+  // the others) and carries on at the next sync.
+  const LOOP_BUDGET_MS = Number(process.env.TALLYAGENT_LOOP_BUDGET_MS) || 3 * 60 * 1000;
+  async function runInBatches(loop, ctx) {
+    const name = (loop.name || 'loop').replace(/Loop$/, '');
+    const startedAt = Date.now();
+    const totals = new Map();
+    let done = 0;
+    for (let round = 1; round <= 10000; round++) {
+      const results = await loop(ctx);
+      let processed = 0;
+      let failedHard = false;
+      for (const r of results) {
+        const t = totals.get(r.company_id) || { company_id: r.company_id, succeeded: 0, failed: 0, error: null };
+        t.succeeded += r.succeeded || 0;
+        t.failed += r.failed || 0;
+        if (r.error) { t.error = r.error; failedHard = true; }
+        totals.set(r.company_id, t);
+        processed += (r.succeeded || 0) + (r.failed || 0);
+      }
+      done += processed;
+      if (processed === 0 || failedHard) break;
+      logger.log('• ' + name + ': ' + done + ' processed so far (batch ' + round + ')');
+      if (Date.now() - startedAt > LOOP_BUDGET_MS) {
+        logger.log('⏸ ' + name + ': paused after ' + Math.round((Date.now() - startedAt) / 1000) + 's — more documents are waiting, click Sync again to continue');
+        break;
+      }
+    }
+    return [...totals.values()];
+  }
+
   async function runSyncCycle(companies) {
     if (companies.length === 0) return;
     // COA snapshot first, so ledgers created in Tally since the last sync are
@@ -113,7 +147,8 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     // voucher events for them.
     const enabled = companies.filter(c => c.sync_enabled !== false);
     if (enabled.length === 0) return;
-    const ctx = { ...loopCtx(), companies: enabled };
+    clearMasterMemo();
+    const ctx = { ...loopCtx(), companies: enabled, batch: createBatch() };
     // SEQUENTIAL, not Promise.all: Tally Prime's XML server is single-
     // threaded and crashes outright (Software Exception c0000005) when
     // several imports land simultaneously — eight concurrent loops made that
@@ -128,7 +163,8 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
       paymentMadeLoop, expenseLoop, journalLoop,
       creditNoteLoop, debitNoteLoop, pullLoop,
     ]) {
-      const loopResults = await loop(ctx);
+      // reconcile and pull manage their own work; every other loop is a push loop that pages
+      const loopResults = (loop === reconcileLoop || loop === pullLoop) ? await loop(ctx) : await runInBatches(loop, ctx);
       for (const r of loopResults) {
         if (r.succeeded || r.failed || r.error) {
           logger.log('• ' + (loop.name || 'loop').replace(/Loop$/, '') + ': ' + (r.succeeded || 0) + ' ok, ' + (r.failed || 0) + ' failed' + (r.error ? ' — ' + r.error : ''));

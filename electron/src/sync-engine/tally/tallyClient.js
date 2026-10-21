@@ -9,6 +9,29 @@ const DEFAULT_TALLY_URL = 'http://localhost:9000';
 const TALLY_TIMEOUT_MS = 90 * 1000;
 const tallyHttp = axios.create({ timeout: TALLY_TIMEOUT_MS });
 
+// Every document pushes the same setup first (unit, stock group, tax ledgers, the customer's ledger,
+// stock items) — about ten Tally round trips before the voucher itself, repeated for each of
+// thousands of documents. Within one sync a given setup request only needs to succeed once, so its
+// reply is remembered and replayed. The memory is dropped at the start of every sync
+// (clearMasterMemo) so a ledger deleted in Tally in between is created again.
+const masterMemo = new Map();
+const isMasterRequest = data =>
+  typeof data === 'string' && /<REPORTNAME>\s*All Masters\s*<\/REPORTNAME>/.test(data);
+const succeededOrExists = xml => {
+  const err = (String(xml).match(/<LINEERROR>(.*?)<\/LINEERROR>/) || [])[1];
+  return !err || /already exists/i.test(err);
+};
+const rawPost = tallyHttp.post.bind(tallyHttp);
+tallyHttp.post = async (url, data, config) => {
+  if (!isMasterRequest(data)) return rawPost(url, data, config);
+  const key = url + '\n' + data;
+  if (masterMemo.has(key)) return masterMemo.get(key);
+  const res = await rawPost(url, data, config);
+  if (succeededOrExists(res.data)) masterMemo.set(key, res);
+  return res;
+};
+const clearMasterMemo = () => masterMemo.clear();
+
 // 🔎 Extracts error text from Tally response XML string
 // Tally XML-escapes the message ("Ledger &apos;X&apos; does not exist"); users read it in the
 // Logs view and in Timber, so hand it back as plain text.
@@ -93,6 +116,7 @@ async function checkTallyStatus(tallyUrl = DEFAULT_TALLY_URL) {
 module.exports = {
   DEFAULT_TALLY_URL,
   tallyHttp,
+  clearMasterMemo,
   TALLY_TIMEOUT_MS,
   extractLineError,
   extractVoucherId,

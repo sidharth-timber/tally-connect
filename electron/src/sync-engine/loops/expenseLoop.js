@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
@@ -73,7 +74,7 @@ async function ensureExpenseMasterData(expense, tallyUrl, ledgerNames = {}) {
 }
 
 // Syncs pending expenses for every company.
-async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const results = [];
   for (const company of companies) {
     const { company_id } = company;
@@ -83,11 +84,14 @@ async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
       const res = await axios.post(`${serverUrl}/webhook`, {
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
-        event: 'expense-sync-request'
+        event: 'expense-sync-request',
+        data: pendingData(batch, company_id, 'expense-sync-request')
       });
       const expenses = res.data.expenses || [];
       const ledgerNames = res.data.ledger_names || {};
       for (const expense of expenses) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, 'expense-sync-request', expense.id);
         try {
           await ensureExpenseMasterData(expense, tallyUrl, ledgerNames);
           const xml = buildExpenseXML(expense, ledgerNames);
@@ -117,6 +121,7 @@ async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         } catch (err) {
           logger.error(`❌ Expense ${expense.id} failed:`, err.message);
           await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
+          noteFailed(batch, company_id, 'expense-sync-request', expense.id);
           failed++;
         }
       }

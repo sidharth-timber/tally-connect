@@ -1,4 +1,5 @@
 const axios = require('axios');
+const { pendingData, noteFailed } = require('../batch');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
 const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
@@ -96,7 +97,7 @@ async function ensurePurchaseMasterData(bill, tallyUrl, ledgerNames = {}) {
 }
 
 // Syncs pending vendor bills (purchases) for every company.
-async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
+async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl, batch }) {
   const results = [];
   for (const company of companies) {
     const { company_id } = company;
@@ -106,11 +107,14 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
       const res = await axios.post(`${serverUrl}/webhook`, {
         ...(caKey ? { caKey } : { apiKey }),
         company_id,
-        event: 'bill-sync-request'
+        event: 'bill-sync-request',
+        data: pendingData(batch, company_id, 'bill-sync-request')
       });
       const bills = res.data.bills || [];
       const ledgerNames = res.data.ledger_names || {};
       for (const bill of bills) {
+        // handled for the rest of this sync whatever the outcome, so a lost acknowledgement can't get it re-sent
+        noteFailed(batch, company_id, 'bill-sync-request', bill.id);
         try {
           await ensurePurchaseMasterData(bill, tallyUrl, ledgerNames);
           await ensureCustomLedger(tallyUrl, bill.account_create_name, bill.account_create_parent, 'Indirect Expenses');
@@ -136,6 +140,7 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
         } catch (err) {
           logger.error(`❌ Bill ${bill.id} failed:`, err.message);
           await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'error', error: describeError(err), tallyVoucherNumber: null });
+          noteFailed(batch, company_id, 'bill-sync-request', bill.id);
           failed++;
         }
       }
