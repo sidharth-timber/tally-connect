@@ -12,6 +12,9 @@ const store = new Store({
     // not quietly re-import an old key and log the user straight back in.
     loggedOut: { type: 'boolean', default: false },
     companies: { type: 'array', default: [] },
+    // Per Timber company: the last date (YYYYMMDD) whose Tally vouchers have been imported, so the
+    // pull only reads what is new instead of re-reading history.
+    pullCursors: { type: 'object', default: {} },
     windowBounds: { type: 'object', default: {} },
   },
 });

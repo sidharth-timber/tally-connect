@@ -211,10 +211,11 @@ function parsePurchases(xml) {
       })
       .filter(i => i.name);
 
-    const allLedgers = [
-      ...[...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b),
-      ...[...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b)
-    ].map(b => {
+    // One list or the other, never both: a collection export carries the same entries under
+    // both names, and summing them would double every tax line.
+    const plainEntries = [...body.matchAll(/<LEDGERENTRIES\.LIST>([\s\S]*?)<\/LEDGERENTRIES\.LIST>/g)].map(([, b]) => b);
+    const allEntries = [...body.matchAll(/<ALLLEDGERENTRIES\.LIST>([\s\S]*?)<\/ALLLEDGERENTRIES\.LIST>/g)].map(([, b]) => b);
+    const allLedgers = (plainEntries.length ? plainEntries : allEntries).map(b => {
       const g = t => { const m = b.match(new RegExp(`<${t}>(.*?)<\\/${t}>`)); return m ? m[1].trim() : ''; };
       return { ledger: g('LEDGERNAME'), amount: g('AMOUNT') };
     });

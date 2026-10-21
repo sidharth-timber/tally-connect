@@ -48,7 +48,9 @@ function isNewerVersion(latest, current) {
 // module-level `let`s and top-level setInterval calls in agent.js. It has no
 // Electron imports, so it can run under plain Node (see the CLI harness) or
 // inside Electron's main process (see electron/src/main/index.js).
-function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_URL, agentVersion = '0.0.0' }) {
+// `cursorStore` ({ get(companyId), set(companyId, 'YYYYMMDD') }) keeps the Tally pull's progress across
+// restarts; without one the progress only lasts while the process runs.
+function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_URL, agentVersion = '0.0.0', cursorStore }) {
   const emitter = new EventEmitter();
   const state = createInitialState(agentVersion);
   const companiesById = new Map();
@@ -57,7 +59,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
   let auth = { serverUrl, caKey, apiKey };
 
   function loopCtx() {
-    return { companies: [...companiesById.values()], serverUrl: auth.serverUrl, caKey: auth.caKey, apiKey: auth.apiKey, tallyUrl };
+    return { companies: [...companiesById.values()], serverUrl: auth.serverUrl, caKey: auth.caKey, apiKey: auth.apiKey, tallyUrl, cursorStore };
   }
 
   function emitState() {

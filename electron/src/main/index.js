@@ -82,6 +82,10 @@ if (!gotLock) {
       serverUrl: store.get('serverUrl'),
       caKey: store.get('caKey'),
       agentVersion: app.getVersion(),
+      cursorStore: {
+        get: (companyId) => store.get('pullCursors')?.[String(companyId)] || null,
+        set: (companyId, ymd) => store.set('pullCursors', { ...(store.get('pullCursors') || {}), [String(companyId)]: ymd }),
+      },
     });
 
     const mainWindow = createMainWindow();

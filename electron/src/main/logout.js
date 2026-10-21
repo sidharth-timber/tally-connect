@@ -28,6 +28,7 @@ async function performLogout(engine) {
   store.set('caKey', '');
   store.set('hasCompletedSetup', false);
   store.set('companies', []);
+  store.set('pullCursors', {}); // a different account must not inherit this one's progress
   store.set('loggedOut', true);
 
   const current = getMainWindow();
