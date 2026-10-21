@@ -190,7 +190,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
 
     company.syncing = true;
 
-    logger.log('▶ Sync started for ' + (company.tally_company_name || company.company_name || company.company_id));
+    logger.log('▶ Sync started for ' + (company.company_name ? company.company_name + ' (Tally: ' + company.tally_company_name + ')' : (company.tally_company_name || company.company_id)));
 
     emitState();
     try {

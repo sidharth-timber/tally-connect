@@ -22,14 +22,17 @@ export function renderCompanyRow(company, { onSync }) {
   const info = document.createElement('div');
   info.className = 'company-info';
 
+  // Several Timber companies can be mapped to one Tally company, so the Timber name leads and the
+  // Tally company it syncs with is spelled out below it.
   const name = document.createElement('div');
   name.className = 'company-name';
-  name.textContent = company.tally_company_name;
+  name.textContent = company.company_name || company.tally_company_name;
   info.appendChild(name);
 
   const meta = document.createElement('div');
   meta.className = 'company-meta';
-  meta.textContent = [company.gstin, company.state].filter(Boolean).join(' · ') || 'No GSTIN on file';
+  const details = [company.gstin, company.state].filter(Boolean).join(' · ') || 'No GSTIN on file';
+  meta.textContent = company.company_name ? 'Tally: ' + company.tally_company_name + ' · ' + details : details;
   info.appendChild(meta);
 
   const side = document.createElement('div');
