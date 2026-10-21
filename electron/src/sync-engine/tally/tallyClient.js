@@ -23,6 +23,18 @@ function extractVoucherId(tallyResponse) {
   return match && match[1] !== '0' ? match[1] : null;
 }
 
+// The import envelope can say "fine" while nothing was saved (or the voucher was dropped), and a
+// document marked synced with no voucher behind it is the worst failure here — nothing ever
+// retries it. Insist on a created/altered count and a voucher id.
+function assertImported(tallyResponse, label) {
+  const n = tag => Number((String(tallyResponse).match(new RegExp('<' + tag + '>\\s*(\\d+)')) || [])[1] || 0);
+  if (n('ERRORS') > 0) throw new Error(label + ': Tally reported ' + n('ERRORS') + ' error(s) importing the voucher');
+  if (n('CREATED') + n('ALTERED') === 0) {
+    throw new Error(label + ': Tally did not create the voucher (created 0, ignored ' + n('IGNORED') + '). Check Tally Prime for a dialog or a date outside the open period.');
+  }
+  if (!extractVoucherId(tallyResponse)) throw new Error(label + ': Tally did not return a voucher id');
+}
+
 function dayBookXML(dateStr) {
   return `<?xml version="1.0"?><ENVELOPE><HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER><BODY><EXPORTDATA><REQUESTDESC><REPORTNAME>Day Book</REPORTNAME><STATICVARIABLES><SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT><SVFROMDATE>${dateStr}</SVFROMDATE><SVTODATE>${dateStr}</SVTODATE></STATICVARIABLES></REQUESTDESC></EXPORTDATA></BODY></ENVELOPE>`;
 }
@@ -75,6 +87,7 @@ module.exports = {
   TALLY_TIMEOUT_MS,
   extractLineError,
   extractVoucherId,
+  assertImported,
   fetchTallyCompanies,
   checkTallyStatus,
 };

@@ -1,7 +1,8 @@
 const axios = require('axios');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
+const { rollbackVoucher } = require('../tally/deleteVoucher');
 const {
   buildUnitXML, buildStockGroupXML, buildSalesLedgerXML, buildGSTLedgerXML,
   buildLedgerXML, buildItemXML, buildInvoiceXML,
@@ -140,12 +141,14 @@ async function invoiceLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
             throw new Error(`Invoice creation had exceptions: ${detail}`);
           }
 
+          assertImported(tallyRes.data, 'Invoice');
           const rawDate = invoice.invoice_date || invoice.issue_date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
           const partyName = invoice.customer?.name || invoice.customerName || '';
           const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
             || await fetchTallyVoucherNumber(dateStr, partyName, invoice.total, tallyUrl);
+          if (!tallyVoucherNumber) { await rollbackVoucher(tallyUrl, extractVoucherId(tallyRes.data), 'Sales', dateStr); throw new Error('Invoice: Tally accepted the voucher but it cannot be found in Tally afterwards — check the open company and period, then sync again'); }
           await reportSyncStatus(auth, 'sync-status', company_id, { invoiceId: invoice.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber });
           succeeded++;
         } catch (err) {

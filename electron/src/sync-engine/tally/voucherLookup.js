@@ -2,12 +2,15 @@ const axios = require('axios');
 const logger = require('../logger');
 const { DEFAULT_TALLY_URL, tallyHttp } = require('./tallyClient');
 
+// Voucher Register, not Day Book: Day Book ignores SVFROMDATE/SVTODATE and exports only Tally's
+// *current date* (which moves to the last voucher entered), so lookups silently missed every
+// voucher dated otherwise. Voucher Register honours the requested range.
 function dayBookRangeXML(dateStr) {
   return `<?xml version="1.0"?>
 <ENVELOPE>
   <HEADER><TALLYREQUEST>Export Data</TALLYREQUEST></HEADER>
   <BODY><EXPORTDATA><REQUESTDESC>
-    <REPORTNAME>Day Book</REPORTNAME>
+    <REPORTNAME>Voucher Register</REPORTNAME>
     <STATICVARIABLES>
       <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
       <SVFROMDATE>${dateStr}</SVFROMDATE>

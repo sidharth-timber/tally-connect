@@ -1,7 +1,8 @@
 const axios = require('axios');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
+const { rollbackVoucher } = require('../tally/deleteVoucher');
 const { buildPaymentVoucherXML } = require('../tally/xmlBuilders');
 const { fetchTallyPaymentNumber, fetchTallyVoucherNumberById } = require('../tally/voucherLookup');
 const { reportSyncStatus } = require('../reporting');
@@ -39,11 +40,13 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
             const detail = (tallyRes.data.match(/<ERROR>(.*?)<\/ERROR>/i) || [])[1] || 'no detail';
             throw new Error(`Payment had exceptions: ${detail}`);
           }
+          assertImported(tallyRes.data, 'Payment');
           const rawDate = p.date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
           const paymentNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
             || await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount, tallyUrl);
+          if (!paymentNumber) { await rollbackVoucher(tallyUrl, extractVoucherId(tallyRes.data), 'Payment', dateStr); throw new Error('Payment: Tally accepted the voucher but it cannot be found in Tally afterwards — check the open company and period, then sync again'); }
           await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, paymentNumber });
           succeeded++;
         } catch (err) {

@@ -10,6 +10,9 @@ function fmtDate(d) {
   return d.toISOString().slice(0, 10).replace(/-/g, '');
 }
 
+// Voucher Register, not Day Book: Day Book ignores SVFROMDATE/SVTODATE and exports only Tally's
+// *current date* (which moves to the last voucher entered), so lookups silently missed every
+// voucher dated otherwise. Voucher Register honours the requested range.
 function buildFetchXML(from, to) {
   return `<?xml version="1.0"?>
 <ENVELOPE>
@@ -19,7 +22,7 @@ function buildFetchXML(from, to) {
   <BODY>
     <EXPORTDATA>
       <REQUESTDESC>
-        <REPORTNAME>Day Book</REPORTNAME>
+        <REPORTNAME>Voucher Register</REPORTNAME>
         <STATICVARIABLES>
           <SVEXPORTFORMAT>$$SysName:XML</SVEXPORTFORMAT>
           <SVFROMDATE>${from}</SVFROMDATE>

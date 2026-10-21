@@ -1,7 +1,8 @@
 const axios = require('axios');
 const logger = require('../logger');
 const { describeError } = require('../tally/errors');
-const { extractLineError, extractVoucherId, tallyHttp } = require('../tally/tallyClient');
+const { extractLineError, extractVoucherId, tallyHttp, assertImported } = require('../tally/tallyClient');
+const { rollbackVoucher } = require('../tally/deleteVoucher');
 const {
   buildUnitXML, buildStockGroupXML, buildSalesLedgerXML, buildGSTLedgerXML,
   buildLedgerXML, buildItemXML, buildCreditNoteXML, buildDebitNoteXML,
@@ -127,6 +128,7 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
             throw new Error(`${kind.vchType} had exceptions: ${detail}`);
           }
 
+          assertImported(tallyRes.data, 'Note');
           const rawDate = note.issue_date || new Date().toISOString();
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
@@ -134,6 +136,7 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
             || await fetchTallyNoteVoucherNumber(
             kind.vchType, dateStr, note.customer?.name || '', note.total, tallyUrl
           );
+          if (!tallyVoucherNumber) { await rollbackVoucher(tallyUrl, extractVoucherId(tallyRes.data), kind.vchType, dateStr); throw new Error('Note: Tally accepted the voucher but it cannot be found in Tally afterwards — check the open company and period, then sync again'); }
           await reportSyncStatus(auth, kind.statusEvent, company_id, {
             [kind.idKey]: note.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber,
           });
