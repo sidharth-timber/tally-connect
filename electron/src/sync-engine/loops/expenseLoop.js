@@ -109,7 +109,7 @@ async function expenseLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
             tallyUrl,
             expense.narration || expense.notes
           );
-          await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'success', error: '', tallyVoucherNumber });
+          await reportSyncStatus(auth, 'expense-sync-status', company_id, { expenseId: expense.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           logger.error(`❌ Expense ${expense.id} failed:`, err.message);

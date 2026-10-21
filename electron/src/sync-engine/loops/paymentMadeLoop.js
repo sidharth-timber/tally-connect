@@ -44,7 +44,7 @@ async function paymentMadeLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }
             .split('T')[0].replace(/-/g, '');
           const paymentNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
             || await fetchTallyPaymentNumber(dateStr, p.vendor_name, p.amount, tallyUrl);
-          await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'success', error: '', paymentNumber });
+          await reportSyncStatus(auth, 'payment-made-sync-status', company_id, { paymentMadeId: p.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, paymentNumber });
           succeeded++;
         } catch (err) {
           logger.error(`❌ Vendor payment ${p.id} failed:`, err.message);

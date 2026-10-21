@@ -146,7 +146,7 @@ async function invoiceLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           const partyName = invoice.customer?.name || invoice.customerName || '';
           const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
             || await fetchTallyVoucherNumber(dateStr, partyName, invoice.total, tallyUrl);
-          await reportSyncStatus(auth, 'sync-status', company_id, { invoiceId: invoice.id, status: 'success', error: '', tallyVoucherNumber });
+          await reportSyncStatus(auth, 'sync-status', company_id, { invoiceId: invoice.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           logger.error(`❌ Failed to sync invoice ${invoice.id}: ${err.message}`);

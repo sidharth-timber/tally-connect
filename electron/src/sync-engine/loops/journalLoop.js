@@ -62,7 +62,7 @@ async function journalLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
           const dateStr = (typeof rawDate === 'string' ? rawDate : new Date(rawDate).toISOString())
             .split('T')[0].replace(/-/g, '');
           const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl);
-          await reportSyncStatus(auth, 'journal-sync-status', company_id, { journalId: journal.id, status: 'success', error: '', tallyVoucherNumber });
+          await reportSyncStatus(auth, 'journal-sync-status', company_id, { journalId: journal.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           logger.error('❌ Journal ' + journal.id + ' failed: ' + describeError(err));

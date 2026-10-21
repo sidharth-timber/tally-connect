@@ -128,7 +128,7 @@ async function billLoop({ companies, serverUrl, caKey, apiKey, tallyUrl }) {
             .split('T')[0].replace(/-/g, '');
           const tallyVoucherNumber = await fetchTallyVoucherNumberById(dateStr, extractVoucherId(tallyRes.data), tallyUrl)
             || await fetchTallyPurchaseVoucherNumber(dateStr, bill.vendor_name, bill.total_amount, tallyUrl);
-          await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'success', error: '', tallyVoucherNumber });
+          await reportSyncStatus(auth, 'bill-sync-status', company_id, { billId: bill.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber });
           succeeded++;
         } catch (err) {
           logger.error(`❌ Bill ${bill.id} failed:`, err.message);

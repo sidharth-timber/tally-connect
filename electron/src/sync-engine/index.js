@@ -9,6 +9,7 @@ const { billLoop } = require('./loops/billLoop');
 const { paymentMadeLoop } = require('./loops/paymentMadeLoop');
 const { expenseLoop } = require('./loops/expenseLoop');
 const { journalLoop } = require('./loops/journalLoop');
+const { reconcileLoop } = require('./loops/reconcileLoop');
 const { creditNoteLoop, debitNoteLoop } = require('./loops/noteLoop');
 const { pullLoop } = require('./loops/pullLoop');
 const { coaLoop, fetchAndPushCOA } = require('./loops/coaLoop');
@@ -119,6 +120,7 @@ function createSyncEngine({ serverUrl, caKey, apiKey, tallyUrl = DEFAULT_TALLY_U
     // last, after everything this cycle pushed is already in it.
     const resultsArrays = [];
     for (const loop of [
+      reconcileLoop,
       invoiceLoop, paymentLoop, billLoop,
       paymentMadeLoop, expenseLoop, journalLoop,
       creditNoteLoop, debitNoteLoop, pullLoop,

@@ -135,7 +135,7 @@ async function runNoteLoop(kindKey, { companies, serverUrl, caKey, apiKey, tally
             kind.vchType, dateStr, note.customer?.name || '', note.total, tallyUrl
           );
           await reportSyncStatus(auth, kind.statusEvent, company_id, {
-            [kind.idKey]: note.id, status: 'success', error: '', tallyVoucherNumber,
+            [kind.idKey]: note.id, status: 'success', error: '', tallyMasterId: extractVoucherId(tallyRes.data), voucherDate: dateStr, tallyVoucherNumber,
           });
           succeeded++;
         } catch (err) {
